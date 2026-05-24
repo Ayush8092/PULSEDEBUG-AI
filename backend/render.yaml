@@ -1,0 +1,25 @@
+# PulseDebug AI — Render.com Deployment Configuration
+# File: backend/render.yaml
+# Purpose:
+#     Defines the Render free-tier web service that hosts the FastAPI backend.
+#     Render reads this file when you connect the repository.
+#
+#     Free tier notes:
+#       - Services spin down after 15 minutes of inactivity.
+#       - They spin back up on the first request (cold start ~30s).
+#       - SQLite data is stored in an ephemeral disk — resets on redeploy.
+#         This is fine for a hackathon demo.
+
+services:
+  - type: web
+    name: pulsedebug-api
+    env: python
+    region: oregon
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: GEMINI_API_KEY
+        sync: false          # set manually in the Render dashboard
+      - key: PYTHON_VERSION
+        value: "3.11.0"

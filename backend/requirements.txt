@@ -1,0 +1,11 @@
+# PulseDebug AI — Backend Python Dependencies
+# File: backend/requirements.txt
+# Purpose: All Python packages required to run the FastAPI backend.
+#          All packages are free and open-source.
+#          Versions are pinned for reproducible builds.
+
+fastapi==0.111.0
+uvicorn[standard]==0.29.0
+httpx==0.27.0
+python-dotenv==1.0.1
+pydantic==2.7.1

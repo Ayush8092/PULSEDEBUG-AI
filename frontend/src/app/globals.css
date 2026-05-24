@@ -1,0 +1,98 @@
+/*
+ * PulseDebug AI — Global Styles
+ * File: frontend/src/app/globals.css
+ * Purpose:
+ *   Imports Google Fonts, sets base body styles, and defines shared
+ *   utility classes used across the dashboard.
+ *   Visual language: terminal-dark, high-contrast, electric cyan/green accents.
+ */
+
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=DM+Sans:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --bg-primary:    #0d1117;
+  --bg-secondary:  #161b22;
+  --bg-tertiary:   #21262d;
+  --border:        #30363d;
+  --text-primary:  #e6edf3;
+  --text-secondary:#8b949e;
+  --text-muted:    #484f58;
+  --cyan:   #00d4ff;
+  --green:  #3fb950;
+  --yellow: #d29922;
+  --red:    #f85149;
+  --orange: #fb8f44;
+  --purple: #a371f7;
+}
+
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+
+body {
+  background-color: var(--bg-primary);
+  color: var(--text-primary);
+  font-family: 'DM Sans', system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  min-height: 100vh;
+}
+
+::-webkit-scrollbar       { width: 6px; height: 6px; }
+::-webkit-scrollbar-track  { background: var(--bg-secondary); }
+::-webkit-scrollbar-thumb  { background: var(--border); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #484f58; }
+
+@layer components {
+  .card       { @apply bg-[#161b22] border border-[#30363d] rounded-lg; }
+  .card-hover { @apply card transition-all duration-200 hover:border-[#484f58] hover:bg-[#1c2128] cursor-pointer; }
+
+  .badge-critical   { @apply inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-mono font-medium bg-red-500/10    text-[#f85149] border border-red-500/20; }
+  .badge-warning    { @apply inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-mono font-medium bg-yellow-500/10 text-[#d29922] border border-yellow-500/20; }
+  .badge-investigate{ @apply inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-mono font-medium bg-purple-500/10 text-[#a371f7] border border-purple-500/20; }
+  .badge-resolved   { @apply inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-mono font-medium bg-green-500/10  text-[#3fb950] border border-green-500/20; }
+
+  .code           { @apply font-mono text-sm text-[#00d4ff] bg-[#00d4ff]/5 px-1.5 py-0.5 rounded; }
+  .section-header { @apply text-xs font-mono font-medium text-[#8b949e] uppercase tracking-widest mb-3; }
+  .live-dot       { @apply w-2 h-2 rounded-full bg-[#3fb950] animate-pulse; }
+  .metric-value   { @apply font-display font-bold text-2xl text-[#e6edf3] tabular-nums; }
+  .metric-label   { @apply text-xs font-medium text-[#8b949e] uppercase tracking-wide; }
+
+  .btn-primary { @apply inline-flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium bg-[#00d4ff]/10 text-[#00d4ff] border border-[#00d4ff]/30 hover:bg-[#00d4ff]/20 hover:border-[#00d4ff]/50 transition-all duration-150; }
+  .btn-ghost   { @apply inline-flex items-center gap-2 px-3 py-1.5 rounded-md text-sm font-medium text-[#8b949e] hover:text-[#e6edf3] hover:bg-[#21262d] transition-all duration-150; }
+}
+
+@keyframes scan-line {
+  0%   { transform: translateY(-100%); }
+  100% { transform: translateY(100vh); }
+}
+.scan-line {
+  position: fixed; top: 0; left: 0; right: 0; height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(0,212,255,0.15), transparent);
+  animation: scan-line 8s linear infinite;
+  pointer-events: none; z-index: 100;
+}
+
+.grid-bg {
+  background-image:
+    linear-gradient(rgba(48,54,61,0.3) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(48,54,61,0.3) 1px, transparent 1px);
+  background-size: 24px 24px;
+}
+
+.glow-cyan { box-shadow: 0 0 20px rgba(0,212,255,0.15); }
+.glow-red  { box-shadow: 0 0 20px rgba(248,81,73,0.15); }
+
+.cursor-blink::after {
+  content: '▋';
+  animation: blink 1.2s step-end infinite;
+  color: var(--cyan);
+  margin-left: 2px;
+}
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0; }
+}
