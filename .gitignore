@@ -9,6 +9,7 @@
 *.env
 .env.example
 .env.local.example
+npm-cache/
 
 # ---- Python ----
 __pycache__/
