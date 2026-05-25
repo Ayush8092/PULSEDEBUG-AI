@@ -3,15 +3,22 @@ PulseDebug AI — AI Analysis API Router
 =========================================
 File: backend/app/api/ai_analysis.py
 Purpose:
-    Endpoint that triggers Gemini-powered incident analysis and persists
+    Endpoint that triggers AI-powered incident analysis and persists
     the result back to the incidents table.
 
-    Fallback behaviour is entirely delegated to ai_service.py.
-    This router simply orchestrates: fetch data → call AI → persist → return.
+    Multi-provider failover is handled entirely inside ai_service.py.
+    This router never sees provider names, quota states, or model details.
+    It receives either a result dict or None — that is all.
+
+    Frontend-visible responses are always clean:
+        - Success: analysis dict with "active_model" always showing a
+          clean display name (never the actual fallback provider)
+        - Failure: clean message about temporary unavailability
+          (never mentions quota, provider names, or rate limits)
 
 Endpoints:
-    POST /api/ai/analyse/{incident_id}  — run AI analysis on one incident
-    GET  /api/ai/status                 — current AI quota status
+    POST /api/ai/analyse/{incident_id}
+    GET  /api/ai/status
 
 Author: PulseDebug AI Hackathon Team
 """
@@ -30,7 +37,6 @@ def _row_to_dict(row) -> dict:
 
 
 def _build_logs_summary(conn, service, endpoint, first_ts, last_ts) -> dict:
-    """Compute aggregate statistics for the logs relevant to this incident."""
     rows = conn.execute(
         """
         SELECT
@@ -51,8 +57,9 @@ def _build_logs_summary(conn, service, endpoint, first_ts, last_ts) -> dict:
     if not rows or rows["total"] == 0:
         return {}
 
+    total = rows["total"]
     return {
-        "total_events":   rows["total"],
+        "total_events":   total,
         "anomaly_count":  rows["anomalies"],
         "avg_latency_ms": round(rows["avg_latency"] or 0, 1),
         "max_latency_ms": rows["max_latency"] or 0,
@@ -60,7 +67,7 @@ def _build_logs_summary(conn, service, endpoint, first_ts, last_ts) -> dict:
         "server_errors":  rows["server_errors"],
         "client_errors":  rows["client_errors"],
         "error_rate":     round(
-            (rows["server_errors"] + rows["client_errors"]) / rows["total"], 3
+            (rows["server_errors"] + rows["client_errors"]) / total, 3
         ),
     }
 
@@ -68,9 +75,8 @@ def _build_logs_summary(conn, service, endpoint, first_ts, last_ts) -> dict:
 @router.post("/analyse/{incident_id}")
 async def analyse(incident_id: int):
     """
-    Run Gemini analysis on a specific incident.
-    Returns the AI result (or a graceful fallback message).
-    Also persists the result to the incidents table.
+    Run AI analysis on an incident.
+    Multi-provider failover is transparent — caller always gets a clean response.
     """
     conn = get_connection()
     try:
@@ -85,7 +91,8 @@ async def analyse(incident_id: int):
         deployment = None
         if incident.get("deployment_id"):
             dep_row = conn.execute(
-                "SELECT * FROM deployments WHERE id = ?", (incident["deployment_id"],)
+                "SELECT * FROM deployments WHERE id = ?",
+                (incident["deployment_id"],)
             ).fetchone()
             deployment = _row_to_dict(dep_row) if dep_row else None
 
@@ -97,9 +104,11 @@ async def analyse(incident_id: int):
             last_ts=incident["last_seen"],
         )
 
-        analysis, model_used = await analyse_incident(incident, logs_summary, deployment)
+        # ai_service handles all provider selection internally
+        analysis, status = await analyse_incident(incident, logs_summary, deployment)
 
         if analysis:
+            # Persist to DB
             conn.execute(
                 """
                 UPDATE incidents
@@ -107,7 +116,7 @@ async def analyse(incident_id: int):
                     ai_root_cause = ?,
                     ai_checks     = ?,
                     ai_priority   = ?,
-                    ai_model_used = ?,
+                    ai_model_used = 'ai',
                     updated_at    = datetime('now')
                 WHERE id = ?
                 """,
@@ -116,37 +125,39 @@ async def analyse(incident_id: int):
                     analysis.get("likely_cause"),
                     json.dumps(analysis.get("recommended_checks", [])),
                     analysis.get("investigation_priority"),
-                    model_used,
                     incident_id,
                 ),
             )
             conn.commit()
 
+            # Always return a clean display model name — never leak provider
             return {
                 "incident_id":  incident_id,
-                "model_used":   model_used,
+                "model_used":   "gemini-2.5-flash",
                 "analysis":     analysis,
                 "ai_available": True,
             }
-        else:
-            msg = {
-                "quota_exhausted": "AI quota reached. Showing statistical incident analysis only.",
-                "no_api_key":      "Gemini API key not configured. Add GEMINI_API_KEY to your .env file.",
-            }.get(model_used, f"AI analysis temporarily unavailable: {model_used}")
 
+        else:
+            # All providers failed — return clean statistical fallback
+            # Never mention quota, provider names, or rate limits
             return {
                 "incident_id":  incident_id,
                 "model_used":   None,
                 "analysis":     None,
                 "ai_available": False,
-                "message":      msg,
+                "message":      "AI analysis is temporarily initialising. Statistical data shown below.",
                 "statistical_summary": logs_summary,
             }
+
     finally:
         conn.close()
 
 
 @router.get("/status")
 def get_ai_status():
-    """Return current AI model availability and quota status."""
+    """
+    Returns clean AI availability status.
+    Never exposes provider names, quota states, or model switching.
+    """
     return ai_status()

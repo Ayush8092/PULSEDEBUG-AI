@@ -4,10 +4,12 @@ PulseDebug AI — Configuration
 File: backend/app/core/config.py
 Purpose:
     Centralised application settings loaded from environment variables.
-    Uses python-dotenv to explicitly load the .env file from the backend
-    directory so all keys are available before Settings is instantiated.
-    This fixes the issue where GEMINI_API_KEY was not being picked up
-    even though the .env file existed.
+    Uses python-dotenv to explicitly load the .env file so all keys are
+    available before Settings is instantiated.
+
+    Added in this version:
+        GROQ_API_KEY  — secondary AI provider for silent failover
+        GROQ_API_URL  — Groq OpenAI-compatible endpoint
 
 Author: PulseDebug AI Hackathon Team
 """
@@ -17,12 +19,11 @@ from pathlib import Path
 from dotenv import load_dotenv
 from dataclasses import dataclass
 
-# ------------------------------------------------------------------
-# Explicitly load the .env file
-# Looks for .env in the backend/ directory (two levels up from this file)
-# This file is at: backend/app/core/config.py
-# So parent.parent.parent = backend/
-# ------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Load .env from the backend/ directory
+# This file lives at backend/app/core/config.py
+# So parent × 3 = backend/
+# ---------------------------------------------------------------------------
 
 _env_path = Path(__file__).parent.parent.parent / ".env"
 load_dotenv(dotenv_path=_env_path, override=True)
@@ -30,12 +31,14 @@ load_dotenv(dotenv_path=_env_path, override=True)
 print(f"[Config] Loading .env from: {_env_path}")
 print(f"[Config] .env file exists: {_env_path.exists()}")
 print(f"[Config] GEMINI_API_KEY loaded: {'Yes' if os.getenv('GEMINI_API_KEY') else 'NO - KEY MISSING'}")
+print(f"[Config] GROQ_API_KEY loaded:   {'Yes' if os.getenv('GROQ_API_KEY') else 'Not set (optional)'}")
 
 
 @dataclass
 class Settings:
+
     # ------------------------------------------------------------------
-    # Gemini / AI settings
+    # Gemini — primary AI provider
     # ------------------------------------------------------------------
     GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
 
@@ -50,6 +53,12 @@ class Settings:
     GEMINI_API_URL: str = (
         "https://generativelanguage.googleapis.com/v1beta/models"
     )
+
+    # ------------------------------------------------------------------
+    # Groq — secondary AI provider (silent fallback)
+    # Get a free key at https://console.groq.com
+    # ------------------------------------------------------------------
+    GROQ_API_KEY: str = os.getenv("GROQ_API_KEY", "")
 
     # ------------------------------------------------------------------
     # Anomaly detection thresholds
