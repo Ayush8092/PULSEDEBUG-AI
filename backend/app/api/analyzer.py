@@ -197,9 +197,29 @@ def _inspect_zip(content: bytes) -> dict:
         if any(re.search(p, n, re.IGNORECASE) for p in _SENSITIVE_FILE_PATTERNS)
     ]
 
-    resilience_score = int(
-        sum(1 for r in risks if r["present"]) / len(risks) * 100
-    ) if risks else 0
+    weights = {
+        "timeout_config": 15,
+        "retry_backoff": 15,
+        "circuit_breaker": 15,
+        "db_pool_config": 15,
+        "smtp_fallback": 10,
+        "auth_secret_rotation": 10,
+        "rate_limiting": 10,
+        "health_check": 10,
+    }
+
+    max_score = sum(weights.values())
+
+    earned = sum(
+        weights[r["check"]]
+        for r in risks
+        if r["present"]
+    )
+
+    resilience_score = (
+        int((earned / max_score) * 100)
+        if earned > 0 else 0
+    )
 
     return {
         "total_files":           len(file_list),
@@ -208,7 +228,7 @@ def _inspect_zip(content: bytes) -> dict:
         "checks":                risks,
         "sensitive_files_found": sensitive_files,
         "risks_detected":        [r for r in risks if not r["present"]],
-        "text_sample":           text_corpus[:3000],
+        "text_sample":           text_corpus[:1700],
     }
 
 
@@ -218,24 +238,30 @@ def _inspect_zip(content: bytes) -> dict:
 
 def _build_log_prompt(stats: dict) -> str:
     return f"""
-Analyse these API log statistics and return a JSON object with these exact keys:
+Analyse these API log statistics and return ONLY valid JSON.
+
+Required JSON schema:
 
 {{
-  "overall_health": "<Healthy | Degraded | Critical>",
-  "summary": "<2-3 sentence summary of what the logs show>",
-  "incident_clusters": [
-    {{
-      "title": "<incident name>",
-      "likely_cause": "<root cause>",
-      "severity": "<critical | warning | investigate>",
-      "recommended_fix": "<actionable fix>"
-    }}
-  ],
-  "top_risks": ["<risk 1>", "<risk 2>", "<risk 3>"],
-  "remediation_steps": ["<step 1>", "<step 2>", "<step 3>", "<step 4>"]
+  "incident_summary": "<clear incident summary>",
+  "impact": "<production impact explanation>",
+  "likely_cause": "<root cause analysis>",
+  "recommended_actions": [
+    "<action 1>",
+    "<action 2>",
+    "<action 3>",
+    "<action 4>"
+  ]
 }}
 
-Return ONLY the JSON object. No markdown fences. No preamble.
+Requirements:
+
+- Professional observability language
+- Explain likely production failure patterns
+- Mention correlated latency / status anomalies
+- Be concise but technically specific
+- No markdown
+- Return ONLY JSON
 
 Log statistics:
 {json.dumps(stats, indent=2)}
@@ -245,31 +271,39 @@ Log statistics:
 def _build_zip_prompt(inspection: dict) -> str:
     risks = [r for r in inspection.get("checks", []) if not r["present"]]
     return f"""
-Analyse this backend project resilience inspection and return a JSON object with these exact keys:
+Analyse this backend project resilience inspection.
+
+Return ONLY valid JSON.
+
+Required schema:
 
 {{
-  "resilience_score": {inspection.get("resilience_score", 0)},
-  "overall_verdict": "<Strong | Adequate | At Risk | Critical Risk>",
-  "summary": "<2-3 sentence overall assessment>",
-  "risk_findings": [
-    {{
-      "check": "<check name>",
-      "risk_description": "<why this is a problem with a real-world failure scenario>",
-      "recommended_fix": "<specific actionable fix>",
-      "severity": "<critical | warning | low>"
-    }}
-  ],
-  "quick_wins": ["<easiest fix 1>", "<easiest fix 2>", "<easiest fix 3>"],
-  "deployment_risks": "<paragraph about deployment risk level>"
+  "architecture_health_summary": "<overall resilience assessment>",
+  "operational_risk_impact": "<production failure impact>",
+  "likely_architectural_weaknesses": "<design weaknesses detected>",
+  "recommended_improvements": [
+    "<improvement 1>",
+    "<improvement 2>",
+    "<improvement 3>",
+    "<improvement 4>",
+    "<improvement 5>"
+  ]
 }}
 
-Return ONLY the JSON object. No markdown fences. No preamble.
+Requirements:
 
-Missing resilience checks:
+- Senior production reliability language
+- Explain real failure consequences
+- Reference missing resilience controls
+- No markdown
+- Return ONLY JSON
+
+Missing checks:
 {json.dumps(risks, indent=2)}
 
+
 Project file sample:
-{inspection.get("text_sample", "")[:2000]}
+{inspection.get("text_sample", "")[:1700]}
 """.strip()
 
 
