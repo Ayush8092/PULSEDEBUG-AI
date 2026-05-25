@@ -6,6 +6,10 @@ Purpose:
     Groups related anomalous API log events into de-duplicated incident
     records. Clustering is entirely deterministic — no AI required.
 
+    Two clustering entry points:
+        cluster_recent()   — used by the simulator after scenario injection
+        cluster_external() — used by the /api/ingest endpoint for real traffic
+
     Clustering dimensions (all must match to join an existing incident):
         - service name
         - endpoint
@@ -34,9 +38,11 @@ def _now_iso() -> str:
 
 SEVERITY_MAP = {
     500: "critical", 502: "critical", 503: "critical", 504: "critical",
+    501: "critical",
     401: "critical", 403: "critical",
     429: "warning",
     400: "investigate",
+    422: "investigate",
 }
 
 SCENARIO_TITLES = {
@@ -49,11 +55,24 @@ SCENARIO_TITLES = {
 }
 
 
+def _severity_for(status_code: int) -> str:
+    return SEVERITY_MAP.get(status_code, "critical" if status_code >= 500 else "investigate")
+
+
 class IncidentClusterer:
 
-    def cluster_recent(self, conn: sqlite3.Connection, *, scenario: str,
-                       deployment_id: Optional[int] = None) -> Optional[int]:
-        """Cluster the most recent anomalous events for a scenario into an incident."""
+    # ------------------------------------------------------------------
+    # Simulator path (existing)
+    # ------------------------------------------------------------------
+
+    def cluster_recent(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        scenario: str,
+        deployment_id: Optional[int] = None,
+    ) -> Optional[int]:
+        """Cluster the most recent anomalous events for a simulator scenario."""
         cutoff = (
             datetime.now(timezone.utc)
             - timedelta(seconds=settings.CLUSTER_TIME_WINDOW_SEC)
@@ -80,19 +99,90 @@ class IncidentClusterer:
         count       = len(rows)
 
         error_sig = f"{status_code}:{error_type}"
-        severity  = SEVERITY_MAP.get(status_code, "investigate")
+        severity  = _severity_for(status_code)
         title     = SCENARIO_TITLES.get(scenario, f"{service} — Incident Detected")
+
+        return self._upsert_incident(
+            conn,
+            title=title,
+            service=service,
+            endpoint=endpoint,
+            error_sig=error_sig,
+            severity=severity,
+            count=count,
+            first_ts=first_ts,
+            last_ts=last_ts,
+            deployment_id=deployment_id,
+        )
+
+    # ------------------------------------------------------------------
+    # External ingest path (new)
+    # ------------------------------------------------------------------
+
+    def cluster_external(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        service: str,
+        endpoint: str,
+        status_code: int,
+        error_type: str,
+        scenario_key: str,
+    ) -> Optional[int]:
+        """
+        Cluster a single externally-ingested anomalous event.
+        Creates or updates an incident for the (service, endpoint, error)
+        combination.
+        """
+        error_sig = f"{status_code}:{error_type.upper()}"
+        severity  = _severity_for(status_code)
+        now       = _now_iso()
+
+        # Build a human-readable title from the service + error type
+        title = f"{service} — {error_type.replace('_', ' ').title()} (External)"
+
+        return self._upsert_incident(
+            conn,
+            title=title,
+            service=service,
+            endpoint=endpoint,
+            error_sig=error_sig,
+            severity=severity,
+            count=1,
+            first_ts=now,
+            last_ts=now,
+            deployment_id=None,
+        )
+
+    # ------------------------------------------------------------------
+    # Shared upsert logic
+    # ------------------------------------------------------------------
+
+    def _upsert_incident(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        title: str,
+        service: str,
+        endpoint: str,
+        error_sig: str,
+        severity: str,
+        count: int,
+        first_ts: str,
+        last_ts: str,
+        deployment_id: Optional[int],
+    ) -> int:
+        is_deployment_related = deployment_id is not None
 
         existing = conn.execute(
             """
             SELECT id, occurrence_count FROM incidents
-            WHERE service = ? AND endpoint = ? AND error_signature = ? AND status = 'open'
+            WHERE service = ? AND endpoint = ? AND error_signature = ?
+              AND status = 'open'
             ORDER BY first_detected DESC LIMIT 1
             """,
             (service, endpoint, error_sig),
         ).fetchone()
-
-        is_deployment_related = deployment_id is not None
 
         if existing:
             new_count = existing["occurrence_count"] + count
@@ -121,7 +211,8 @@ class IncidentClusterer:
                 ) VALUES (?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?)
                 """,
                 (title, service, endpoint, error_sig, severity, count,
-                 first_ts, last_ts, deployment_id, 1 if is_deployment_related else 0),
+                 first_ts, last_ts, deployment_id,
+                 1 if is_deployment_related else 0),
             )
             conn.commit()
             incident_id = cursor.lastrowid

@@ -2,8 +2,13 @@
  * PulseDebug AI — Root Layout
  * File: frontend/src/app/layout.tsx
  * Purpose:
- *   Next.js root layout. Sets document metadata and renders the ambient
- *   scan-line animation overlay that appears on every page.
+ *   Next.js App Router root layout. Wraps every page including the new
+ *   /analyze and /integrate routes. Sets metadata, loads fonts via CSS,
+ *   and renders the ambient scan-line animation overlay.
+ *
+ *   The globals.css import is a side-effect import — it injects Tailwind
+ *   base styles and custom CSS variables globally. The tsconfig.json must
+ *   have moduleResolution set to "bundler" for this to resolve without error.
  */
 
 import type { Metadata } from "next";
@@ -18,7 +23,11 @@ export const metadata: Metadata = {
   },
 };
 
-export default function RootLayout({ children }: { children: React.ReactNode }) {
+export default function RootLayout({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
   return (
     <html lang="en">
       <body className="grid-bg min-h-screen antialiased">
