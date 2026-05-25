@@ -136,55 +136,54 @@ function LogResults({ result }: { result: JobResult }) {
           <div className="card p-5 border-[#a371f7]/20 bg-[#a371f7]/5">
             <div className="flex items-center gap-2 mb-3">
               <Brain size={14} className="text-[#a371f7]" />
-              <span className="section-header mb-0">AI Health Assessment</span>
-            </div>
-            <div className="flex items-center gap-3 mb-3">
-              <span className="text-sm text-[#8b949e]">Overall Health:</span>
-              <span className={`font-mono text-sm font-bold ${
-                ai.overall_health === "Healthy"  ? "text-[#3fb950]" :
-                ai.overall_health === "Critical" ? "text-[#f85149]" : "text-[#d29922]"
-              }`}>
-                {ai.overall_health}
+              <span className="section-header mb-0">
+                AI Incident Analysis
               </span>
             </div>
-            <p className="text-sm text-[#c9d1d9] leading-relaxed">{ai.summary}</p>
+
+            <div className="space-y-4 text-sm text-[#c9d1d9]">
+              <div>
+                <p className="text-[#8b949e] mb-1 font-medium">
+                  Incident Summary
+                </p>
+                <p>{ai.incident_summary}</p>
+              </div>
+
+              <div>
+                <p className="text-[#8b949e] mb-1 font-medium">
+                  Impact
+                </p>
+                <p>{ai.impact}</p>
+              </div>
+
+              <div>
+                <p className="text-[#8b949e] mb-1 font-medium">
+                  Likely Cause
+                </p>
+                <p>{ai.likely_cause}</p>
+              </div>
+            </div>
           </div>
 
-          {ai.incident_clusters?.length > 0 && (
+          {ai.recommended_actions?.length > 0 && (
             <CollapsibleSection
-              title={`Incident Clusters (${ai.incident_clusters.length} found)`}
+              title="Recommended Actions"
               defaultOpen
             >
-              <div className="space-y-3 mt-4">
-                {ai.incident_clusters.map((cluster: any, i: number) => (
-                  <div key={i} className="rounded-lg border border-[#30363d] p-4 space-y-2">
-                    <div className="flex items-center gap-2">
-                      <SeverityBadge severity={cluster.severity} />
-                      <span className="font-medium text-sm text-[#e6edf3]">{cluster.title}</span>
-                    </div>
-                    <p className="text-xs text-[#8b949e]">
-                      <span className="text-[#484f58]">Cause: </span>{cluster.likely_cause}
-                    </p>
-                    <p className="text-xs text-[#3fb950]">
-                      <span className="text-[#484f58]">Fix: </span>{cluster.recommended_fix}
-                    </p>
-                  </div>
-                ))}
-              </div>
-            </CollapsibleSection>
-          )}
-
-          {ai.remediation_steps?.length > 0 && (
-            <CollapsibleSection title="Remediation Steps" defaultOpen>
               <ul className="space-y-2 mt-4">
-                {ai.remediation_steps.map((step: string, i: number) => (
-                  <li key={i} className="flex items-start gap-2 text-sm text-[#c9d1d9]">
-                    <span className="font-mono text-[#00d4ff] text-xs mt-0.5 flex-shrink-0">
-                      [{String(i + 1).padStart(2, "0")}]
-                    </span>
-                    {step}
-                  </li>
-                ))}
+                {ai.recommended_actions.map(
+                  (step: string, i: number) => (
+                    <li
+                      key={i}
+                      className="flex items-start gap-2 text-sm text-[#c9d1d9]"
+                    >
+                      <span className="font-mono text-[#00d4ff] text-xs mt-0.5 flex-shrink-0">
+                        [{String(i + 1).padStart(2, "0")}]
+                      </span>
+                      {step}
+                    </li>
+                  )
+                )}
               </ul>
             </CollapsibleSection>
           )}
