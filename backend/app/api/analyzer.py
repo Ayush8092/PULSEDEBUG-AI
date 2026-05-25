@@ -231,11 +231,6 @@ def _inspect_zip(content: bytes) -> dict:
         "text_sample":           text_corpus[:1700],
     }
 
-
-# ---------------------------------------------------------------------------
-# Prompt builders
-# ---------------------------------------------------------------------------
-
 def _build_log_prompt(stats: dict) -> str:
     return f"""
 Analyse these API log statistics and return ONLY valid JSON.
@@ -266,10 +261,13 @@ Requirements:
 Log statistics:
 {json.dumps(stats, indent=2)}
 """.strip()
-
+# ---------------------------------------------------------------------------
+# Prompt builders
+# ---------------------------------------------------------------------------
 
 def _build_zip_prompt(inspection: dict) -> str:
     risks = [r for r in inspection.get("checks", []) if not r["present"]]
+
     return f"""
 Analyse this backend project resilience inspection.
 
@@ -278,31 +276,34 @@ Return ONLY valid JSON.
 Required schema:
 
 {{
-  "architecture_health_summary": "<overall resilience assessment>",
-  "operational_risk_impact": "<production failure impact>",
-  "likely_architectural_weaknesses": "<design weaknesses detected>",
-  "recommended_improvements": [
-    "<improvement 1>",
-    "<improvement 2>",
-    "<improvement 3>",
-    "<improvement 4>",
-    "<improvement 5>"
+  "overall_verdict": "<Strong | Moderate Risk | Critical Risk>",
+  "summary": "<clear resilience assessment summary>",
+  "deployment_risks": "<production impact explanation>",
+
+  "risk_findings": [
+    {{
+      "check": "<missing control>",
+      "severity": "<critical|warning|investigate|low>",
+      "risk_description": "<why this matters>",
+      "recommended_fix": "<specific fix>"
+    }}
   ]
 }}
 
-Requirements:
+Rules:
 
-- Senior production reliability language
-- Explain real failure consequences
-- Reference missing resilience controls
+- Professional SRE language
+- Explain operational consequences
+- Use concise technical language
+- Severity must be:
+  critical / warning / investigate / low
 - No markdown
 - Return ONLY JSON
 
 Missing checks:
 {json.dumps(risks, indent=2)}
 
-
-Project file sample:
+Project sample:
 {inspection.get("text_sample", "")[:1700]}
 """.strip()
 
