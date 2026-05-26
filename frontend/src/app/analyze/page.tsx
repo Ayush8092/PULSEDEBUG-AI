@@ -2,13 +2,29 @@
  * PulseDebug AI — Project Analyzer Page
  * File: frontend/src/app/analyze/page.tsx
  * Purpose:
- *   Upload-based project health analyzer. Production polish:
- *   - Improved empty-state: "Drop ZIP / logs here for resilience audit"
- *   - Supported types clearly listed in empty state
- *   - Upload success toast feedback
- *   - Micro-animation on upload completion
- *   - TypeScript types without angle-bracket generics
+ *   Upload-based project health analyzer with full AI diagnosis output.
  *
+ *   Log file results render:
+ *     1. Metric cards (requests, error rate, latency, p95)
+ *     2. Incident Summary card (AI executive summary)
+ *     3. Impact card
+ *     4. Likely Cause card
+ *     5. Recommended Actions (numbered steps)
+ *     6. Raw Analysis JSON (collapsible accordion)
+ *
+ *   ZIP file results render:
+ *     1. Score cards (resilience score, files, risks, checks passed)
+ *     2. Architecture Health Summary card
+ *     3. Operational Risk Impact card
+ *     4. Architectural Weaknesses card
+ *     5. Recommended Improvements (numbered steps)
+ *     6. Raw Static Findings JSON (collapsible accordion)
+ *
+ *   Gemini/Groq failover is completely invisible.
+ *   Loading shimmer shown during AI generation.
+ *   All sections fade in on completion.
+ *
+ * Author: PulseDebug AI Hackathon Team
  */
 
 "use client";
@@ -16,298 +32,434 @@
 import { useState, useRef, useCallback } from "react";
 import Link from "next/link";
 import {
-  ArrowLeft, Zap, Upload, AlertTriangle,
-  CheckCircle, XCircle, Loader2, Brain,
-  ChevronDown, ChevronUp, RefreshCw, FileText,
+  ArrowLeft,
+  Zap,
+  Upload,
+  AlertTriangle,
+  CheckCircle,
+  XCircle,
+  Loader2,
+  Brain,
+  ChevronDown,
+  ChevronUp,
+  RefreshCw,
+  Shield,
+  Activity,
+  TrendingUp,
+  FileText,
 } from "lucide-react";
 
 const BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
-// Types without angle brackets
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
 
 type JobStatus = "queued" | "processing" | "complete" | "error";
 type JobType   = "log_analysis" | "zip_inspection";
 
-type JobResult = {
-  status:       JobStatus;
-  type?:        JobType;
-  filename?:    string;
-  error?:       string;
-  statistics?:  Record<string, any>;
-  inspection?:  Record<string, any>;
-  ai_analysis?: Record<string, any>;
-  ai_available?:boolean;
-  completed_at?:string;
+type RecommendedAction = {
+  step:   string;
+  title:  string;
+  detail: string;
 };
 
+type RecommendedImprovement = {
+  step:    string;
+  title:   string;
+  detail:  string;
+  library: string;
+};
+
+type LogResult = {
+  status:               JobStatus;
+  type:                 "log_analysis";
+  filename:             string;
+  metrics:              Record<string, any>;
+  incident_summary:     string;
+  impact:               string;
+  likely_cause:         string;
+  recommended_actions:  RecommendedAction[];
+  raw_analysis:         Record<string, any>;
+  ai_available:         boolean;
+  completed_at:         string;
+};
+
+type ZipResult = {
+  status:                      JobStatus;
+  type:                        "zip_inspection";
+  filename:                    string;
+  resilience_score:            number;
+  files_scanned:               number;
+  risks_detected:              number;
+  checks_passed:               number;
+  architecture_health_summary: string;
+  operational_risk_impact:     string;
+  architectural_weaknesses:    string;
+  recommended_improvements:    RecommendedImprovement[];
+  raw_findings:                Record<string, any>;
+  ai_available:                boolean;
+  completed_at:                string;
+};
+
+type JobResult =
+  | { status: "queued" | "processing" | "error"; error?: string }
+  | LogResult
+  | ZipResult;
+
+// ---------------------------------------------------------------------------
 // Shared components
+// ---------------------------------------------------------------------------
 
-function SeverityBadge({ severity }: { severity: string }) {
-  const map: Record<string, string> = {
-    critical:    "badge-critical",
-    warning:     "badge-warning",
-    investigate: "badge-investigate",
-    low:         "badge-resolved",
-  };
-  return (
-    <span className={map[severity] || "badge-investigate"}>
-      {severity.toUpperCase()}
-    </span>
-  );
-}
-
-function StatCard({ label, value, color = "#00d4ff" }: {
+function StatCard({
+  label,
+  value,
+  color = "#00d4ff",
+  sub,
+}: {
   label: string;
   value: string | number;
   color?: string;
+  sub?: string;
 }) {
   return (
-    <div className="card p-4" style={{ borderColor: `${color}22` }}>
-      <p className="metric-label mb-1">{label}</p>
-      <p className="font-display font-bold text-xl tabular-nums" style={{ color }}>
+    <div
+      className="card p-4 flex flex-col gap-1"
+      style={{ borderColor: `${color}25` }}
+    >
+      <p className="metric-label">{label}</p>
+      <p
+        className="font-display font-bold text-2xl tabular-nums"
+        style={{ color }}
+      >
         {value}
       </p>
+      {sub && <p className="text-xs text-[#484f58] font-mono">{sub}</p>}
     </div>
   );
 }
 
-function CollapsibleSection({ title, children, defaultOpen = false }: {
-  title: string;
+function SectionCard({
+  icon,
+  label,
+  color,
+  children,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  color: string;
   children: React.ReactNode;
-  defaultOpen?: boolean;
 }) {
-  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <div
+      className="rounded-lg border p-5 space-y-3 animate-fade-in"
+      style={{
+        background:  `${color}06`,
+        borderColor: `${color}28`,
+      }}
+    >
+      <div className="flex items-center gap-2">
+        <span style={{ color }}>{icon}</span>
+        <p className="text-xs font-mono font-medium uppercase tracking-widest"
+           style={{ color }}>
+          {label}
+        </p>
+      </div>
+      {children}
+    </div>
+  );
+}
+
+function ActionCard({
+  step,
+  title,
+  detail,
+  library,
+  color,
+}: {
+  step: string;
+  title: string;
+  detail: string;
+  library?: string;
+  color: string;
+}) {
+  return (
+    <div className="card p-4 space-y-1.5 animate-fade-in">
+      <div className="flex items-start gap-3">
+        <span
+          className="font-mono text-sm font-bold flex-shrink-0 mt-0.5"
+          style={{ color }}
+        >
+          [{step}]
+        </span>
+        <div className="flex-1 min-w-0">
+          <p className="text-sm font-medium text-[#e6edf3]">{title}</p>
+          <p className="text-xs text-[#8b949e] mt-1 leading-relaxed">{detail}</p>
+          {library && (
+            <p className="text-xs font-mono mt-1.5" style={{ color }}>
+              → {library}
+            </p>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function RawJsonAccordion({
+  label,
+  data,
+}: {
+  label: string;
+  data: Record<string, any>;
+}) {
+  const [open, setOpen] = useState(false);
+
   return (
     <div className="card overflow-hidden">
       <button
         onClick={() => setOpen((v) => !v)}
-        className="w-full flex items-center justify-between px-5 py-4 text-left hover:bg-[#1c2128] transition-colors"
+        className="w-full flex items-center justify-between px-5 py-4 hover:bg-[#1c2128] transition-colors"
       >
-        <span className="font-medium text-sm text-[#e6edf3]">{title}</span>
-        {open
-          ? <ChevronUp size={14} className="text-[#484f58]" />
-          : <ChevronDown size={14} className="text-[#484f58]" />}
+        <div className="flex items-center gap-2">
+          <FileText size={13} className="text-[#484f58]" />
+          <span className="text-sm font-mono text-[#8b949e]">{label}</span>
+        </div>
+        {open ? (
+          <ChevronUp size={13} className="text-[#484f58]" />
+        ) : (
+          <ChevronDown size={13} className="text-[#484f58]" />
+        )}
       </button>
       {open && (
-        <div className="px-5 pb-5 border-t border-[#21262d]">{children}</div>
+        <div className="border-t border-[#21262d] px-5 pb-5 pt-4 animate-fade-in">
+          <pre className="text-xs font-mono text-[#8b949e] overflow-x-auto leading-relaxed">
+            {JSON.stringify(data, null, 2)}
+          </pre>
+        </div>
       )}
     </div>
   );
 }
 
-// Log analysis results
+function GeminiShimmer({ label }: { label: string }) {
+  return (
+    <div className="rounded-lg border border-[#a371f7]/20 bg-[#a371f7]/5 p-5 space-y-4">
+      <div className="flex items-center gap-2">
+        <Loader2 size={13} className="text-[#a371f7] animate-spin" />
+        <span className="text-xs font-mono text-[#a371f7]">{label}</span>
+      </div>
+      <div className="space-y-2">
+        {[85, 95, 70, 90, 60].map((w, i) => (
+          <div
+            key={i}
+            className="h-2.5 rounded animate-pulse"
+            style={{
+              width:            `${w}%`,
+              background:       "rgba(163,113,247,0.15)",
+              animationDelay:   `${i * 100}ms`,
+            }}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
 
-function LogResults({ result }: { result: JobResult }) {
-  const stats = result.statistics!;
-  const ai    = result.ai_analysis;
+// ---------------------------------------------------------------------------
+// Log analysis results renderer
+// ---------------------------------------------------------------------------
+
+function LogResults({ result }: { result: LogResult }) {
+  const m          = result.metrics;
+  const errorPct   = ((m.error_rate || 0) * 100).toFixed(1);
+  const errorColor = (m.error_rate || 0) > 0.1 ? "#f85149" : "#3fb950";
 
   return (
     <div className="space-y-4 animate-fade-in">
+
+      {/* Metric cards */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-        <StatCard label="Total Requests" value={stats.total_requests?.toLocaleString() || 0} color="#00d4ff" />
+        <StatCard
+          label="Total Requests"
+          value={(m.total_requests || 0).toLocaleString()}
+          color="#00d4ff"
+        />
         <StatCard
           label="Error Rate"
-          value={`${(((stats.error_rate as number) || 0) * 100).toFixed(1)}%`}
-          color={(stats.error_rate as number) > 0.1 ? "#f85149" : "#3fb950"}
+          value={`${errorPct}%`}
+          color={errorColor}
+          sub={m.retry_storm_detected ? "⚠ retry storm" : undefined}
         />
         <StatCard
           label="Avg Latency"
-          value={`${stats.latency?.avg_ms || 0}ms`}
-          color={stats.latency?.avg_ms > 1000 ? "#f85149" : "#d29922"}
+          value={`${m.latency?.avg_ms || 0}ms`}
+          color={m.latency?.avg_ms > 1000 ? "#f85149" : "#d29922"}
         />
         <StatCard
           label="P95 Latency"
-          value={`${stats.latency?.p95_ms || 0}ms`}
-          color={stats.latency?.p95_ms > 2000 ? "#f85149" : "#8b949e"}
+          value={`${m.latency?.p95_ms || 0}ms`}
+          color={m.latency?.p95_ms > 2000 ? "#f85149" : "#8b949e"}
         />
       </div>
 
-      {stats.retry_storm_detected && (
-        <div className="card p-4 border-[#f85149]/30 bg-[#f85149]/5 flex items-center gap-3">
-          <AlertTriangle size={16} className="text-[#f85149] flex-shrink-0" />
-          <p className="text-sm text-[#f85149] font-medium">
-            Retry storm detected — {stats.retry_count as number} retry events found
+      {/* 1. Incident Summary */}
+      <SectionCard
+        icon={<Brain size={14} />}
+        label="Incident Summary"
+        color="#a371f7"
+      >
+        <p className="text-sm text-[#c9d1d9] leading-relaxed">
+          {result.incident_summary}
+        </p>
+      </SectionCard>
+
+      {/* 2. Impact */}
+      <SectionCard
+        icon={<Activity size={14} />}
+        label="Impact"
+        color="#f85149"
+      >
+        <p className="text-sm text-[#c9d1d9] leading-relaxed">
+          {result.impact}
+        </p>
+      </SectionCard>
+
+      {/* 3. Likely Cause */}
+      <SectionCard
+        icon={<AlertTriangle size={14} />}
+        label="Likely Cause"
+        color="#d29922"
+      >
+        <p className="text-sm text-[#c9d1d9] leading-relaxed">
+          {result.likely_cause}
+        </p>
+      </SectionCard>
+
+      {/* 4. Recommended Actions */}
+      {result.recommended_actions?.length > 0 && (
+        <div className="space-y-2">
+          <p className="text-xs font-mono font-medium text-[#8b949e] uppercase tracking-widest px-1">
+            Recommended Actions
           </p>
+          {result.recommended_actions.map((a) => (
+            <ActionCard
+              key={a.step}
+              step={a.step}
+              title={a.title}
+              detail={a.detail}
+              color="#00d4ff"
+            />
+          ))}
         </div>
       )}
 
-      {ai && !ai.parse_error ? (
-        <>
-          <div className="card p-5 border-[#a371f7]/20 bg-[#a371f7]/5">
-            <div className="flex items-center gap-2 mb-3">
-              <Brain size={14} className="text-[#a371f7]" />
-              <span className="section-header mb-0">
-                AI Incident Analysis
-              </span>
-            </div>
-
-            <div className="space-y-4 text-sm text-[#c9d1d9]">
-              <div>
-                <p className="text-[#8b949e] mb-1 font-medium">
-                  Incident Summary
-                </p>
-                <p>{ai.incident_summary}</p>
-              </div>
-
-              <div>
-                <p className="text-[#8b949e] mb-1 font-medium">
-                  Impact
-                </p>
-                <p>{ai.impact}</p>
-              </div>
-
-              <div>
-                <p className="text-[#8b949e] mb-1 font-medium">
-                  Likely Cause
-                </p>
-                <p>{ai.likely_cause}</p>
-              </div>
-            </div>
-          </div>
-
-          {ai.recommended_actions?.length > 0 && (
-            <CollapsibleSection
-              title="Recommended Actions"
-              defaultOpen
-            >
-              <ul className="space-y-2 mt-4">
-                {ai.recommended_actions.map(
-                  (step: string, i: number) => (
-                    <li
-                      key={i}
-                      className="flex items-start gap-2 text-sm text-[#c9d1d9]"
-                    >
-                      <span className="font-mono text-[#00d4ff] text-xs mt-0.5 flex-shrink-0">
-                        [{String(i + 1).padStart(2, "0")}]
-                      </span>
-                      {step}
-                    </li>
-                  )
-                )}
-              </ul>
-            </CollapsibleSection>
-          )}
-        </>
-      ) : !result.ai_available ? (
-        <div className="card p-4 border-[#d29922]/20 bg-[#d29922]/5 flex items-center gap-3">
-          <AlertTriangle size={14} className="text-[#d29922]" />
-          <span className="text-sm text-[#d29922]">
-            AI quota reached. Statistical analysis shown above.
-          </span>
-        </div>
-      ) : null}
-
-      <CollapsibleSection title="Raw Statistics">
-        <pre className="mt-4 text-xs font-mono text-[#8b949e] overflow-x-auto">
-          {JSON.stringify(stats, null, 2)}
-        </pre>
-      </CollapsibleSection>
+      {/* 5. Raw Analysis JSON */}
+      <RawJsonAccordion label="View Raw Analysis" data={result.raw_analysis} />
     </div>
   );
 }
 
-// ZIP inspection results
+// ---------------------------------------------------------------------------
+// ZIP inspection results renderer
+// ---------------------------------------------------------------------------
 
-function ZipResults({ result }: { result: JobResult }) {
-  const inspection = result.inspection!;
-  const ai         = result.ai_analysis;
-  const score      = (inspection.resilience_score as number) || 0;
-  const scoreColor = score >= 75 ? "#3fb950" : score >= 50 ? "#d29922" : "#f85149";
+function ZipResults({ result }: { result: ZipResult }) {
+  const score      = result.resilience_score || 0;
+  const scoreColor =
+    score >= 75 ? "#3fb950" : score >= 50 ? "#d29922" : "#f85149";
+
+  const scoreLabel =
+    score >= 75 ? "Strong"
+    : score >= 50 ? "Adequate"
+    : score >= 30 ? "At Risk"
+    : "Critical Risk";
 
   return (
     <div className="space-y-4 animate-fade-in">
+
+      {/* Score cards */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-        <StatCard label="Resilience Score" value={`${score}%`}            color={scoreColor} />
-        <StatCard label="Files Scanned"    value={inspection.total_files || 0} color="#00d4ff" />
+        <StatCard
+          label="Resilience Score"
+          value={`${score}%`}
+          color={scoreColor}
+          sub={scoreLabel}
+        />
+        <StatCard
+          label="Files Scanned"
+          value={result.files_scanned || 0}
+          color="#00d4ff"
+        />
         <StatCard
           label="Risks Detected"
-          value={inspection.risks_detected?.length || 0}
-          color={(inspection.risks_detected?.length || 0) > 3 ? "#f85149" : "#d29922"}
+          value={result.risks_detected || 0}
+          color={(result.risks_detected || 0) > 3 ? "#f85149" : "#d29922"}
         />
         <StatCard
           label="Checks Passed"
-          value={inspection.checks?.filter((c: any) => c.present).length || 0}
+          value={result.checks_passed || 0}
           color="#3fb950"
         />
       </div>
 
-      {inspection.sensitive_files_found?.length > 0 && (
-        <div className="card p-4 border-[#f85149]/30 bg-[#f85149]/5">
-          <div className="flex items-center gap-2 mb-2">
-            <AlertTriangle size={14} className="text-[#f85149]" />
-            <span className="text-sm font-medium text-[#f85149]">
-              Potentially Sensitive Files Found
-            </span>
-          </div>
-          <div className="flex flex-wrap gap-2">
-            {inspection.sensitive_files_found.map((f: string) => (
-              <code key={f} className="text-xs font-mono text-[#f85149] bg-[#f85149]/10 px-2 py-0.5 rounded">
-                {f}
-              </code>
-            ))}
-          </div>
-        </div>
-      )}
+      {/* 1. Architecture Health Summary */}
+      <SectionCard
+        icon={<Shield size={14} />}
+        label="Architecture Health Summary"
+        color="#a371f7"
+      >
+        <p className="text-sm text-[#c9d1d9] leading-relaxed">
+          {result.architecture_health_summary}
+        </p>
+      </SectionCard>
 
-      {ai && !ai.parse_error && (
-        <div className="card p-5 border-[#a371f7]/20 bg-[#a371f7]/5">
-          <div className="flex items-center gap-2 mb-3">
-            <Brain size={14} className="text-[#a371f7]" />
-            <span className="section-header mb-0">AI Resilience Assessment</span>
-          </div>
-          <div className="flex items-center gap-3 mb-3">
-            <span className="text-sm text-[#8b949e]">Verdict:</span>
-            <span className={`font-mono text-sm font-bold ${
-              ai.overall_verdict?.includes("Strong") ? "text-[#3fb950]" :
-              ai.overall_verdict?.includes("Critical") ? "text-[#f85149]" : "text-[#d29922]"
-            }`}>
-              {ai.overall_verdict}
-            </span>
-          </div>
-          <p className="text-sm text-[#c9d1d9] leading-relaxed">{ai.summary}</p>
-          {ai.deployment_risks && (
-            <p className="text-xs text-[#8b949e] mt-3 pt-3 border-t border-[#a371f7]/20 leading-relaxed">
-              {ai.deployment_risks}
-            </p>
-          )}
-        </div>
-      )}
+      {/* 2. Operational Risk Impact */}
+      <SectionCard
+        icon={<Activity size={14} />}
+        label="Operational Risk Impact"
+        color="#f85149"
+      >
+        <p className="text-sm text-[#c9d1d9] leading-relaxed">
+          {result.operational_risk_impact}
+        </p>
+      </SectionCard>
 
-      {(ai?.risk_findings || inspection.risks_detected)?.length > 0 && (
-        <CollapsibleSection title="Risk Findings" defaultOpen>
-          <div className="space-y-3 mt-4">
-            {(ai?.risk_findings || inspection.risks_detected).map((risk: any, i: number) => (
-              <div key={i} className="rounded-lg border border-[#30363d] p-4 space-y-2">
-                <div className="flex items-center gap-2">
-                  {risk.severity && <SeverityBadge severity={risk.severity} />}
-                  <span className="font-mono text-xs text-[#484f58]">{risk.check}</span>
-                </div>
-                <p className="text-sm text-[#c9d1d9]">{risk.risk_description || risk.risk}</p>
-                {risk.recommended_fix && (
-                  <p className="text-xs text-[#3fb950] font-mono border-l-2 border-[#3fb950]/30 pl-2">
-                    → {risk.recommended_fix}
-                  </p>
-                )}
-              </div>
-            ))}
-          </div>
-        </CollapsibleSection>
-      )}
+      {/* 3. Architectural Weaknesses */}
+      <SectionCard
+        icon={<AlertTriangle size={14} />}
+        label="Likely Architectural Weaknesses"
+        color="#d29922"
+      >
+        <p className="text-sm text-[#c9d1d9] leading-relaxed">
+          {result.architectural_weaknesses}
+        </p>
+      </SectionCard>
 
-      <CollapsibleSection title="All Resilience Checks">
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-2 mt-4">
-          {inspection.checks?.map((check: any) => (
-            <div key={check.check} className="flex items-center gap-2 text-xs font-mono">
-              {check.present
-                ? <CheckCircle size={12} className="text-[#3fb950] flex-shrink-0" />
-                : <XCircle    size={12} className="text-[#f85149] flex-shrink-0" />}
-              <span className={check.present ? "text-[#8b949e]" : "text-[#f85149]"}>
-                {check.check.replace(/_/g, " ")}
-              </span>
-            </div>
+      {/* 4. Recommended Improvements */}
+      {result.recommended_improvements?.length > 0 && (
+        <div className="space-y-2">
+          <p className="text-xs font-mono font-medium text-[#8b949e] uppercase tracking-widest px-1">
+            Recommended Improvements
+          </p>
+          {result.recommended_improvements.map((imp) => (
+            <ActionCard
+              key={imp.step}
+              step={imp.step}
+              title={imp.title}
+              detail={imp.detail}
+              library={imp.library}
+              color="#a371f7"
+            />
           ))}
         </div>
-      </CollapsibleSection>
+      )}
+
+      {/* 5. Raw Static Findings */}
+      <RawJsonAccordion
+        label="View Raw Static Findings"
+        data={result.raw_findings || {}}
+      />
     </div>
   );
 }
@@ -323,18 +475,32 @@ export default function AnalyzePage() {
   const [polling,   setPolling]   = useState(false);
   const [result,    setResult]    = useState<JobResult | null>(null);
   const [error,     setError]     = useState<string | null>(null);
+  const [pollMsg,   setPollMsg]   = useState("Running analysis…");
   const fileRef = useRef<HTMLInputElement>(null);
+
+  const POLL_MESSAGES = [
+    "Parsing log patterns…",
+    "Clustering failure signatures…",
+    "Running resilience checks…",
+    "Generating AI diagnosis…",
+    "Preparing recommendations…",
+  ];
 
   const pollResult = useCallback(async (id: string) => {
     setPolling(true);
     let attempts = 0;
-    const maxAttempts = 40;
+    const maxAttempts = 60;
+    let msgIdx = 0;
 
     const check = async () => {
       attempts++;
+      msgIdx = (msgIdx + 1) % POLL_MESSAGES.length;
+      setPollMsg(POLL_MESSAGES[msgIdx]);
+
       try {
         const res  = await fetch(`${BASE_URL}/api/analyzer/results/${id}`);
         const data = (await res.json()) as JobResult;
+
         if (data.status === "complete" || data.status === "error") {
           setResult(data);
           setPolling(false);
@@ -347,7 +513,7 @@ export default function AnalyzePage() {
           setPolling(false);
         }
       } catch {
-        setError("Lost connection while waiting for results.");
+        setError("Lost connection. Please try again.");
         setPolling(false);
       }
     };
@@ -364,17 +530,22 @@ export default function AnalyzePage() {
     try {
       const form = new FormData();
       form.append("file", file);
-      const res  = await fetch(`${BASE_URL}/api/analyzer/upload`, { method: "POST", body: form });
+
+      const res  = await fetch(`${BASE_URL}/api/analyzer/upload`, {
+        method: "POST",
+        body:   form,
+      });
       const data = await res.json();
 
       if (!res.ok) {
         setError(data.detail || "Upload failed.");
         return;
       }
+
       setJobId(data.job_id);
       pollResult(data.job_id);
     } catch {
-      setError("Could not reach the backend. Make sure it is running on port 8000.");
+      setError("Could not reach the backend. Make sure it is running.");
     } finally {
       setUploading(false);
     }
@@ -399,12 +570,19 @@ export default function AnalyzePage() {
     if (fileRef.current) fileRef.current.value = "";
   };
 
+  const isComplete = result && "status" in result && result.status === "complete";
+  const isError    = result && "status" in result && result.status === "error";
+
   return (
     <div className="min-h-screen bg-[#0d1117]">
 
+      {/* Header */}
       <header className="border-b border-[#30363d] bg-[#0d1117]/90 backdrop-blur-sm sticky top-0 z-50">
         <div className="max-w-5xl mx-auto px-6 h-14 flex items-center justify-between">
-          <Link href="/" className="flex items-center gap-2 text-[#8b949e] hover:text-[#e6edf3] transition-colors">
+          <Link
+            href="/"
+            className="flex items-center gap-2 text-[#8b949e] hover:text-[#e6edf3] transition-colors"
+          >
             <ArrowLeft size={14} />
             <span className="text-sm font-mono">Back to Dashboard</span>
           </Link>
@@ -412,7 +590,9 @@ export default function AnalyzePage() {
             <Zap size={14} className="text-[#00d4ff]" />
             <span className="font-display font-bold text-[#e6edf3]">PulseDebug</span>
             <span className="font-display font-bold text-[#00d4ff]">AI</span>
-            <span className="font-mono text-xs text-[#484f58] ml-2">Project Analyzer</span>
+            <span className="font-mono text-xs text-[#484f58] ml-2">
+              Project Analyzer
+            </span>
           </div>
         </div>
       </header>
@@ -425,23 +605,28 @@ export default function AnalyzePage() {
             Analyze Your Project Health
           </h1>
           <p className="text-[#8b949e] text-sm leading-relaxed max-w-2xl">
-            Upload your backend project ZIP or API log files. PulseDebug inspects
-            for resilience risks and uses Gemini AI to explain every finding with
-            specific, actionable fixes.
+            Upload your backend project ZIP or API log files. PulseDebug runs
+            resilience checks and generates a professional AI-powered audit report
+            with specific, actionable remediation steps.
           </p>
         </div>
 
         {/* Upload zone */}
-        {!result && !polling && (
+        {!isComplete && !polling && (
           <div
             onDragOver={(e) => { e.preventDefault(); setDragging(true); }}
             onDragLeave={() => setDragging(false)}
             onDrop={onDrop}
             onClick={() => fileRef.current?.click()}
-            className="card p-14 flex flex-col items-center justify-center cursor-pointer transition-all duration-200 text-center select-none"
+            className="card p-14 flex flex-col items-center justify-center cursor-pointer
+                       transition-all duration-200 text-center select-none"
             style={{
-              borderColor: dragging ? "#00d4ff" : uploading ? "#a371f7" : "#30363d",
-              background:  dragging ? "rgba(0,212,255,0.04)" : undefined,
+              borderColor: dragging
+                ? "#a371f7"
+                : uploading
+                ? "#a371f7"
+                : "#30363d",
+              background: dragging ? "rgba(163,113,247,0.04)" : undefined,
             }}
           >
             <input
@@ -462,9 +647,9 @@ export default function AnalyzePage() {
                 <div
                   className="w-16 h-16 rounded-full flex items-center justify-center mb-5"
                   style={{
-                    background: "rgba(163,113,247,0.10)",
-                    border: "1px solid rgba(163,113,247,0.30)",
-                    boxShadow: "0 0 24px rgba(163,113,247,0.15)",
+                    background:  "rgba(163,113,247,0.10)",
+                    border:      "1px solid rgba(163,113,247,0.30)",
+                    boxShadow:   "0 0 28px rgba(163,113,247,0.18)",
                   }}
                 >
                   <Upload size={24} style={{ color: "#a371f7" }} />
@@ -473,30 +658,40 @@ export default function AnalyzePage() {
                 <p className="font-medium text-[#e6edf3] text-base mb-1">
                   Drop ZIP / logs here for resilience audit
                 </p>
-                <p className="text-sm text-[#8b949e] mb-4">or click to browse your files</p>
+                <p className="text-sm text-[#8b949e] mb-4">
+                  or click to browse your files
+                </p>
 
-                {/* Supported types */}
                 <div className="flex items-center gap-2 flex-wrap justify-center">
                   {[
-                    { ext: ".zip",  color: "#00d4ff" },
-                    { ext: ".log",  color: "#a371f7" },
-                    { ext: ".json", color: "#3fb950" },
-                    { ext: ".txt",  color: "#d29922" },
+                    { ext: ".zip",  color: "#00d4ff", desc: "Architecture audit" },
+                    { ext: ".log",  color: "#a371f7", desc: "Incident analysis" },
+                    { ext: ".json", color: "#3fb950", desc: "JSON logs" },
+                    { ext: ".txt",  color: "#d29922", desc: "Plain text logs" },
                   ].map((item) => (
-                    <span
+                    <div
                       key={item.ext}
-                      className="font-mono text-xs px-2 py-0.5 rounded border"
+                      className="flex flex-col items-center px-3 py-1.5 rounded border"
                       style={{
-                        color: item.color,
                         borderColor: `${item.color}33`,
                         background:  `${item.color}0d`,
                       }}
                     >
-                      {item.ext}
-                    </span>
+                      <span
+                        className="font-mono text-xs font-bold"
+                        style={{ color: item.color }}
+                      >
+                        {item.ext}
+                      </span>
+                      <span className="font-mono text-[10px] text-[#484f58] mt-0.5">
+                        {item.desc}
+                      </span>
+                    </div>
                   ))}
-                  <span className="font-mono text-xs text-[#484f58]">· Max 10MB</span>
                 </div>
+                <p className="font-mono text-xs text-[#484f58] mt-4">
+                  Max 10MB
+                </p>
               </>
             )}
           </div>
@@ -507,46 +702,72 @@ export default function AnalyzePage() {
           <div className="card p-4 border-[#f85149]/30 bg-[#f85149]/5 flex items-center gap-3">
             <AlertTriangle size={14} className="text-[#f85149] flex-shrink-0" />
             <p className="text-sm text-[#f85149]">{error}</p>
-            <button onClick={reset} className="btn-ghost ml-auto text-xs">Try again</button>
+            <button onClick={reset} className="btn-ghost ml-auto text-xs">
+              Try again
+            </button>
           </div>
         )}
 
-        {/* Polling */}
+        {/* Polling / AI generation shimmer */}
         {polling && (
-          <div className="card p-8 flex flex-col items-center gap-4">
-            <Loader2 size={28} className="text-[#a371f7] animate-spin" />
-            <div className="text-center">
-              <p className="text-sm font-medium text-[#e6edf3]">Analysing your project…</p>
-              <p className="text-xs text-[#484f58] mt-1 font-mono">
-                Running resilience checks + Gemini RCA
-              </p>
+          <div className="space-y-4">
+            <GeminiShimmer label={pollMsg} />
+            <div className="card p-6 space-y-3">
+              {[90, 70, 80, 60].map((w, i) => (
+                <div
+                  key={i}
+                  className="h-3 rounded animate-pulse"
+                  style={{
+                    width:            `${w}%`,
+                    background:       "#21262d",
+                    animationDelay:   `${i * 150}ms`,
+                  }}
+                />
+              ))}
             </div>
           </div>
         )}
 
         {/* Results */}
-        {result?.status === "complete" && (
+        {isComplete && result && "type" in result && (
           <div className="space-y-4">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
                 <CheckCircle size={16} className="text-[#3fb950]" />
                 <span className="font-medium text-sm text-[#e6edf3]">
-                  Analysis complete — {result.filename}
+                  Analysis complete —{" "}
+                  <span className="font-mono text-[#8b949e]">
+                    {result.filename}
+                  </span>
                 </span>
               </div>
-              <button onClick={reset} className="btn-ghost text-xs flex items-center gap-1">
-                <RefreshCw size={11} /> Analyze another file
+              <button
+                onClick={reset}
+                className="btn-ghost text-xs flex items-center gap-1.5"
+              >
+                <RefreshCw size={11} />
+                Analyze another file
               </button>
             </div>
-            {result.type === "log_analysis"  && <LogResults  result={result} />}
-            {result.type === "zip_inspection" && <ZipResults result={result} />}
+
+            {result.type === "log_analysis" && (
+              <LogResults result={result as LogResult} />
+            )}
+            {result.type === "zip_inspection" && (
+              <ZipResults result={result as ZipResult} />
+            )}
           </div>
         )}
 
-        {result?.status === "error" && (
+        {/* Error result */}
+        {isError && result && "error" in result && (
           <div className="card p-5 border-[#f85149]/30 bg-[#f85149]/5">
-            <p className="text-sm text-[#f85149]">Analysis failed: {result.error}</p>
-            <button onClick={reset} className="btn-ghost mt-3 text-xs">Try again</button>
+            <p className="text-sm text-[#f85149]">
+              Analysis failed: {result.error}
+            </p>
+            <button onClick={reset} className="btn-ghost mt-3 text-xs">
+              Try again
+            </button>
           </div>
         )}
 
