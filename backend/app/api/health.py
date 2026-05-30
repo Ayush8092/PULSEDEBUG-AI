@@ -3,13 +3,8 @@ PulseDebug AI — Health & Status Router
 =========================================
 File: backend/app/api/health.py
 Purpose:
-    Provides basic health-check and system-status endpoints.
-    Used by the frontend to confirm the backend is alive and to
-    show the current AI model availability status on the dashboard.
-
-Endpoints:
-    GET /api/health          — simple liveness probe
-    GET /api/status          — system summary (DB stats, AI status)
+    Health check and system status endpoints.
+    Updated to include external incident count in status.
 
 Author: PulseDebug AI Hackathon Team
 """
@@ -23,16 +18,11 @@ router = APIRouter()
 
 @router.get("/health")
 def health_check():
-    """Liveness probe — returns 200 if the server is running."""
     return {"status": "ok", "service": "PulseDebug AI"}
 
 
 @router.get("/status")
 def system_status():
-    """
-    Returns aggregate counts and AI availability.
-    Consumed by the dashboard System Health cards.
-    """
     conn = get_connection()
     try:
         total_requests = conn.execute(
@@ -52,17 +42,22 @@ def system_status():
         ).fetchone()[0]
 
         critical_incidents = conn.execute(
-            "SELECT COUNT(*) FROM incidents WHERE status = 'open' AND severity = 'critical'"
+            "SELECT COUNT(*) FROM incidents WHERE status='open' AND severity='critical'"
+        ).fetchone()[0]
+
+        external_incidents = conn.execute(
+            "SELECT COUNT(*) FROM incidents WHERE status='open' AND source='external'"
         ).fetchone()[0]
 
         return {
-            "total_requests":     total_requests,
-            "failed_requests":    failed_requests,
-            "avg_latency_ms":     round(avg_latency, 1),
-            "active_incidents":   active_incidents,
-            "critical_incidents": critical_incidents,
-            "error_rate":         round(failed_requests / max(total_requests, 1), 4),
-            "ai":                 ai_status(),
+            "total_requests":      total_requests,
+            "failed_requests":     failed_requests,
+            "avg_latency_ms":      round(avg_latency, 1),
+            "active_incidents":    active_incidents,
+            "critical_incidents":  critical_incidents,
+            "external_incidents":  external_incidents,
+            "error_rate":          round(failed_requests / max(total_requests, 1), 4),
+            "ai":                  ai_status(),
         }
     finally:
         conn.close()

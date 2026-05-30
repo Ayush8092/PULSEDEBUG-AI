@@ -4,28 +4,17 @@ PulseDebug AI — Real API Log Ingestion Endpoint
 File: backend/app/api/ingest.py
 Purpose:
     Accepts real telemetry from external projects via POST /api/ingest.
-    When a payload arrives it is validated, stored, run through anomaly
-    detection, clustered into incidents, correlated with deployments, and
-    — if the incident crosses a severity threshold — queued for Gemini RCA.
-
-    This is the endpoint that makes PulseDebug a real monitoring backend
-    rather than a simulation-only demo.
-
-    Expected payload:
-        {
-            "service":         "Orders API",
-            "endpoint":        "/orders/create",
-            "status":          500,
-            "latency":         4100,
-            "error_signature": "DB_TIMEOUT",     (optional)
-            "error_msg":       "...",            (optional)
-            "method":          "POST"            (optional, default GET)
-        }
+    Upgrades:
+        - Tags all ingested events with source='external'
+        - Creates timeline events for incident lifecycle replay
+        - Triggers AI fix command generation for critical incidents
+        - Runs correlation engine after clustering
 
 Author: PulseDebug AI Hackathon Team
 """
 
 import asyncio
+import json
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -36,16 +25,13 @@ from app.core.database import get_connection
 from app.services.anomaly_detector import AnomalyDetector
 from app.services.clustering import IncidentClusterer
 from app.services.ai_service import analyse_incident, ai_status
-import json
+from app.services.timeline import add_timeline_event
+from app.services.correlation import run_correlation_engine
 
 router = APIRouter()
 _detector  = AnomalyDetector()
 _clusterer = IncidentClusterer()
 
-
-# ---------------------------------------------------------------------------
-# Pydantic schema for inbound telemetry
-# ---------------------------------------------------------------------------
 
 class IngestPayload(BaseModel):
     service:          str            = Field(..., min_length=1, max_length=100)
@@ -63,23 +49,15 @@ class IngestPayload(BaseModel):
 
 
 class IngestResponse(BaseModel):
-    received:       bool
-    log_id:         int
-    is_anomaly:     bool
-    incident_id:    Optional[int]
-    ai_queued:      bool
-    message:        str
+    received:    bool
+    log_id:      int
+    is_anomaly:  bool
+    incident_id: Optional[int]
+    ai_queued:   bool
+    message:     str
 
 
-# ---------------------------------------------------------------------------
-# Background task — run Gemini RCA on a new/updated incident
-# ---------------------------------------------------------------------------
-
-async def _maybe_run_rca(incident_id: int) -> None:
-    """
-    Runs in the background after a high-severity incident is created or
-    updated.  Persists AI result back to the incident row.
-    """
+async def _run_rca_and_timeline(incident_id: int) -> None:
     conn = get_connection()
     try:
         row = conn.execute(
@@ -89,8 +67,6 @@ async def _maybe_run_rca(incident_id: int) -> None:
             return
 
         incident = dict(row)
-
-        # Only run RCA for critical/warning incidents without existing analysis
         if incident.get("ai_summary"):
             return
         if incident["severity"] not in ("critical", "warning"):
@@ -104,13 +80,11 @@ async def _maybe_run_rca(incident_id: int) -> None:
             ).fetchone()
             deployment = dict(dep) if dep else None
 
-        # Build log statistics
         rows = conn.execute(
             """
             SELECT COUNT(*) as total,
                    SUM(CASE WHEN is_anomaly=1 THEN 1 ELSE 0 END) as anomalies,
-                   AVG(latency_ms) as avg_lat,
-                   MAX(latency_ms) as max_lat,
+                   AVG(latency_ms) as avg_lat, MAX(latency_ms) as max_lat,
                    SUM(CASE WHEN status_code>=500 THEN 1 ELSE 0 END) as srv_err,
                    SUM(CASE WHEN status_code>=400 AND status_code<500 THEN 1 ELSE 0 END) as cli_err
             FROM api_logs
@@ -135,14 +109,15 @@ async def _maybe_run_rca(incident_id: int) -> None:
                 ),
             }
 
-        analysis, model_used = await analyse_incident(incident, logs_summary, deployment)
+        analysis, _ = await analyse_incident(incident, logs_summary, deployment)
 
         if analysis:
             conn.execute(
                 """
                 UPDATE incidents
                 SET ai_summary=?, ai_root_cause=?, ai_checks=?,
-                    ai_priority=?, ai_model_used=?, updated_at=datetime('now')
+                    ai_priority=?, ai_model_used='ai',
+                    ai_confidence=?, updated_at=datetime('now')
                 WHERE id=?
                 """,
                 (
@@ -150,81 +125,70 @@ async def _maybe_run_rca(incident_id: int) -> None:
                     analysis.get("likely_cause"),
                     json.dumps(analysis.get("recommended_checks", [])),
                     analysis.get("investigation_priority"),
-                    model_used,
+                    _confidence_from_label(
+                        analysis.get("confidence_labels", {})
+                        .get("likely_cause", "Needs Investigation")
+                    ),
                     incident_id,
                 )
             )
             conn.commit()
-            print(f"[Ingest] RCA complete for incident #{incident_id} via {model_used}")
+
+            add_timeline_event(
+                conn, incident_id,
+                event_type="ai_analysis",
+                title="AI analysis generated",
+                detail=f"Root cause: {analysis.get('likely_cause', '')[:100]}",
+            )
 
     except Exception as exc:
-        print(f"[Ingest] RCA background task error: {exc}")
+        print(f"[Ingest] RCA error: {exc}")
     finally:
         conn.close()
 
 
-# ---------------------------------------------------------------------------
-# Ingest endpoint
-# ---------------------------------------------------------------------------
+def _confidence_from_label(label: str) -> float:
+    mapping = {
+        "High Likelihood":     0.85,
+        "Moderate Likelihood": 0.60,
+        "Needs Investigation": 0.35,
+    }
+    return mapping.get(label, 0.50)
+
 
 @router.post("", response_model=IngestResponse)
 async def ingest_event(
     payload: IngestPayload,
     background_tasks: BackgroundTasks,
 ):
-    """
-    Accept a single telemetry event from an external service.
-    Runs anomaly detection synchronously, clustering asynchronously.
-    Returns immediately so the caller is not blocked.
-    """
     conn = get_connection()
     try:
         now = datetime.now(timezone.utc).isoformat()
 
-        # ------------------------------------------------------------------
-        # 1. Store the raw event
-        # ------------------------------------------------------------------
         cursor = conn.execute(
             """
             INSERT INTO api_logs
                 (timestamp, service, endpoint, method, status_code,
-                 latency_ms, error_type, error_msg, is_anomaly, scenario)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 'external_ingest')
+                 latency_ms, error_type, error_msg, is_anomaly, scenario, source)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 'external_ingest', 'external')
             """,
-            (
-                now,
-                payload.service,
-                payload.endpoint,
-                payload.method,
-                payload.status,
-                payload.latency,
-                payload.error_signature,
-                payload.error_msg,
-            )
+            (now, payload.service, payload.endpoint, payload.method,
+             payload.status, payload.latency,
+             payload.error_signature, payload.error_msg)
         )
         conn.commit()
         log_id = cursor.lastrowid
 
-        # ------------------------------------------------------------------
-        # 2. Run anomaly detection
-        # ------------------------------------------------------------------
         is_anomaly = _detector.evaluate(
-            conn,
-            log_id=log_id,
-            service=payload.service,
-            endpoint=payload.endpoint,
-            status_code=payload.status,
+            conn, log_id=log_id, service=payload.service,
+            endpoint=payload.endpoint, status_code=payload.status,
             latency_ms=payload.latency,
         )
 
-        # ------------------------------------------------------------------
-        # 3. Cluster if anomalous
-        # ------------------------------------------------------------------
-        incident_id  = None
-        ai_queued    = False
+        incident_id = None
+        ai_queued   = False
 
         if is_anomaly:
-            # Use a synthetic scenario key based on service + error signature
             scenario_key = (
                 payload.error_signature
                 or f"ext_{payload.service.lower().replace(' ', '_')}_{payload.status}"
@@ -236,25 +200,33 @@ async def ingest_event(
                 status_code=payload.status,
                 error_type=payload.error_signature or "UNKNOWN",
                 scenario_key=scenario_key,
+                source="external",
             )
 
-            # ------------------------------------------------------------------
-            # 4. Queue background RCA for critical incidents
-            # ------------------------------------------------------------------
-            if incident_id and ai_status()["available"]:
-                inc_row = conn.execute(
-                    "SELECT severity, occurrence_count FROM incidents WHERE id=?",
-                    (incident_id,)
-                ).fetchone()
-                if inc_row and inc_row["severity"] in ("critical", "warning"):
-                    background_tasks.add_task(_maybe_run_rca, incident_id)
-                    ai_queued = True
+            if incident_id:
+                # Add timeline event for detection
+                add_timeline_event(
+                    conn, incident_id,
+                    event_type="anomaly_detected",
+                    title="Anomaly detected",
+                    detail=f"{payload.error_signature or 'Unknown error'} on {payload.endpoint}",
+                )
+
+                # Run correlation engine
+                background_tasks.add_task(run_correlation_engine, incident_id)
+
+                if ai_status()["available"]:
+                    inc_row = conn.execute(
+                        "SELECT severity FROM incidents WHERE id=?",
+                        (incident_id,)
+                    ).fetchone()
+                    if inc_row and inc_row["severity"] in ("critical", "warning"):
+                        background_tasks.add_task(_run_rca_and_timeline, incident_id)
+                        ai_queued = True
 
         return IngestResponse(
-            received=True,
-            log_id=log_id,
-            is_anomaly=is_anomaly,
-            incident_id=incident_id,
+            received=True, log_id=log_id,
+            is_anomaly=is_anomaly, incident_id=incident_id,
             ai_queued=ai_queued,
             message=(
                 f"Event stored. Anomaly detected — incident #{incident_id} updated."
@@ -262,32 +234,21 @@ async def ingest_event(
                 else "Event stored. No anomaly detected."
             ),
         )
-
     finally:
         conn.close()
 
 
 @router.get("/schema")
 def ingest_schema():
-    """Returns the expected ingest payload schema — useful for SDK docs."""
     return {
-        "endpoint":  "POST /api/ingest",
+        "endpoint": "POST /api/ingest",
         "fields": {
-            "service":         "string  (required) — e.g. 'Orders API'",
-            "endpoint":        "string  (required) — e.g. '/orders/create'",
-            "status":          "integer (required) — HTTP status code 100-599",
+            "service":         "string  (required)",
+            "endpoint":        "string  (required)",
+            "status":          "integer (required) — HTTP status code",
             "latency":         "integer (required) — response time in ms",
-            "error_signature": "string  (optional) — e.g. 'DB_TIMEOUT'",
-            "error_msg":       "string  (optional) — full error message",
-            "method":          "string  (optional) — HTTP method, default GET",
+            "error_signature": "string  (optional)",
+            "error_msg":       "string  (optional)",
+            "method":          "string  (optional, default GET)",
         },
-        "example": {
-            "service":         "Orders API",
-            "endpoint":        "/orders/create",
-            "status":          500,
-            "latency":         4100,
-            "error_signature": "DB_TIMEOUT",
-            "error_msg":       "Connection pool exhausted after 4100ms",
-            "method":          "POST",
-        }
     }

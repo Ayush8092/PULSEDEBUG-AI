@@ -3,24 +3,8 @@ PulseDebug AI — Incident Clustering Engine
 ============================================
 File: backend/app/services/clustering.py
 Purpose:
-    Groups related anomalous API log events into de-duplicated incident
-    records. Clustering is entirely deterministic — no AI required.
-
-    Two clustering entry points:
-        cluster_recent()   — used by the simulator after scenario injection
-        cluster_external() — used by the /api/ingest endpoint for real traffic
-
-    Clustering dimensions (all must match to join an existing incident):
-        - service name
-        - endpoint
-        - error_type / HTTP status-code bucket
-        - temporal proximity (events within CLUSTER_TIME_WINDOW_SEC)
-
-    Severity mapping:
-        5xx / 401 / 403   → critical
-        429               → warning
-        latency / burst   → warning
-        other 4xx         → investigate
+    Groups anomalous events into de-duplicated incidents.
+    Upgrade: source tagging (demo / external / manual) on all incidents.
 
 Author: PulseDebug AI Hackathon Team
 """
@@ -38,20 +22,17 @@ def _now_iso() -> str:
 
 SEVERITY_MAP = {
     500: "critical", 502: "critical", 503: "critical", 504: "critical",
-    501: "critical",
-    401: "critical", 403: "critical",
-    429: "warning",
-    400: "investigate",
-    422: "investigate",
+    501: "critical", 401: "critical", 403: "critical",
+    429: "warning",  400: "investigate", 422: "investigate",
 }
 
 SCENARIO_TITLES = {
-    "auth_secret_mismatch":   "Authentication Service — JWT Key Mismatch",
-    "db_timeout":             "Orders API — Database Timeout Cascade",
-    "malformed_payload":      "Payment API — Schema Validation Failure Burst",
-    "deployment_regression":  "Orders API — Deployment Regression (500 Storm)",
-    "dependency_outage":      "Notification API — Upstream SMTP Dependency Outage",
-    "retry_storm":            "Orders API — Consumer Retry Storm (429 Flood)",
+    "auth_secret_mismatch":  "Authentication Service — JWT Key Mismatch",
+    "db_timeout":            "Orders API — Database Timeout Cascade",
+    "malformed_payload":     "Payment API — Schema Validation Failure Burst",
+    "deployment_regression": "Orders API — Deployment Regression (500 Storm)",
+    "dependency_outage":     "Notification API — Upstream SMTP Dependency Outage",
+    "retry_storm":           "Orders API — Consumer Retry Storm (429 Flood)",
 }
 
 
@@ -61,18 +42,14 @@ def _severity_for(status_code: int) -> str:
 
 class IncidentClusterer:
 
-    # ------------------------------------------------------------------
-    # Simulator path (existing)
-    # ------------------------------------------------------------------
-
     def cluster_recent(
         self,
         conn: sqlite3.Connection,
         *,
         scenario: str,
         deployment_id: Optional[int] = None,
+        source: str = "demo",
     ) -> Optional[int]:
-        """Cluster the most recent anomalous events for a simulator scenario."""
         cutoff = (
             datetime.now(timezone.utc)
             - timedelta(seconds=settings.CLUSTER_TIME_WINDOW_SEC)
@@ -103,21 +80,11 @@ class IncidentClusterer:
         title     = SCENARIO_TITLES.get(scenario, f"{service} — Incident Detected")
 
         return self._upsert_incident(
-            conn,
-            title=title,
-            service=service,
-            endpoint=endpoint,
-            error_sig=error_sig,
-            severity=severity,
-            count=count,
-            first_ts=first_ts,
-            last_ts=last_ts,
-            deployment_id=deployment_id,
+            conn, title=title, service=service, endpoint=endpoint,
+            error_sig=error_sig, severity=severity, count=count,
+            first_ts=first_ts, last_ts=last_ts,
+            deployment_id=deployment_id, source=source,
         )
-
-    # ------------------------------------------------------------------
-    # External ingest path (new)
-    # ------------------------------------------------------------------
 
     def cluster_external(
         self,
@@ -128,35 +95,19 @@ class IncidentClusterer:
         status_code: int,
         error_type: str,
         scenario_key: str,
+        source: str = "external",
     ) -> Optional[int]:
-        """
-        Cluster a single externally-ingested anomalous event.
-        Creates or updates an incident for the (service, endpoint, error)
-        combination.
-        """
         error_sig = f"{status_code}:{error_type.upper()}"
         severity  = _severity_for(status_code)
         now       = _now_iso()
-
-        # Build a human-readable title from the service + error type
-        title = f"{service} — {error_type.replace('_', ' ').title()} (External)"
+        title     = f"{service} — {error_type.replace('_', ' ').title()} ({source.title()})"
 
         return self._upsert_incident(
-            conn,
-            title=title,
-            service=service,
-            endpoint=endpoint,
-            error_sig=error_sig,
-            severity=severity,
-            count=1,
-            first_ts=now,
-            last_ts=now,
-            deployment_id=None,
+            conn, title=title, service=service, endpoint=endpoint,
+            error_sig=error_sig, severity=severity, count=1,
+            first_ts=now, last_ts=now,
+            deployment_id=None, source=source,
         )
-
-    # ------------------------------------------------------------------
-    # Shared upsert logic
-    # ------------------------------------------------------------------
 
     def _upsert_incident(
         self,
@@ -171,6 +122,7 @@ class IncidentClusterer:
         first_ts: str,
         last_ts: str,
         deployment_id: Optional[int],
+        source: str = "demo",
     ) -> int:
         is_deployment_related = deployment_id is not None
 
@@ -199,7 +151,6 @@ class IncidentClusterer:
                  1 if is_deployment_related else 0, _now_iso(), existing["id"]),
             )
             conn.commit()
-            print(f"[Clusterer] Updated incident #{existing['id']} — {title}")
             return existing["id"]
         else:
             cursor = conn.execute(
@@ -207,14 +158,13 @@ class IncidentClusterer:
                 INSERT INTO incidents (
                     title, service, endpoint, error_signature,
                     severity, status, occurrence_count,
-                    first_detected, last_seen, deployment_id, deployment_related
-                ) VALUES (?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?)
+                    first_detected, last_seen, deployment_id,
+                    deployment_related, source
+                ) VALUES (?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?)
                 """,
                 (title, service, endpoint, error_sig, severity, count,
                  first_ts, last_ts, deployment_id,
-                 1 if is_deployment_related else 0),
+                 1 if is_deployment_related else 0, source),
             )
             conn.commit()
-            incident_id = cursor.lastrowid
-            print(f"[Clusterer] Created incident #{incident_id} — {title}")
-            return incident_id
+            return cursor.lastrowid

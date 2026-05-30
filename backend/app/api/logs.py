@@ -3,17 +3,8 @@ PulseDebug AI — Logs API Router
 ==================================
 File: backend/app/api/logs.py
 Purpose:
-    Exposes log query and streaming endpoints.
-    The frontend uses /stream (Server-Sent Events) to receive live
-    log events and update the Live Metrics graph without polling.
-
-Endpoints:
-    GET  /api/logs               — paginated log history
-    GET  /api/logs/recent        — last N events (default 50)
-    GET  /api/logs/anomalies     — only anomalous events
-    GET  /api/logs/stream        — SSE stream of new events
-    GET  /api/logs/stats         — per-endpoint latency & error stats
-    GET  /api/logs/timeseries    — bucketed metrics per minute
+    Log query and SSE streaming endpoints.
+    Upgrade: source filtering on all query endpoints.
 
 Author: PulseDebug AI Hackathon Team
 """
@@ -38,23 +29,26 @@ def _row_to_dict(row) -> dict:
 
 @router.get("")
 def get_logs(
-    page: int = Query(1, ge=1),
-    per_page: int = Query(50, ge=1, le=200),
-    service: str | None = None,
+    page:         int  = Query(1, ge=1),
+    per_page:     int  = Query(50, ge=1, le=200),
+    service:      str  = None,
     anomaly_only: bool = False,
+    source:       str  = None,
 ):
-    """Return paginated log events, newest first."""
     conn = get_connection()
     try:
-        offset = (page - 1) * per_page
+        offset     = (page - 1) * per_page
         conditions = []
-        params: list = []
+        params     = []
 
         if service:
             conditions.append("service = ?")
             params.append(service)
         if anomaly_only:
             conditions.append("is_anomaly = 1")
+        if source:
+            conditions.append("source = ?")
+            params.append(source)
 
         where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
 
@@ -68,37 +62,47 @@ def get_logs(
         ).fetchall()
 
         return {
-            "total": total,
-            "page": page,
+            "total":    total,
+            "page":     page,
             "per_page": per_page,
-            "items": [_row_to_dict(r) for r in rows],
+            "items":    [_row_to_dict(r) for r in rows],
         }
     finally:
         conn.close()
 
 
 @router.get("/recent")
-def get_recent_logs(limit: int = Query(50, ge=1, le=500)):
-    """Return the most recent N log events."""
+def get_recent_logs(limit: int = Query(50, ge=1, le=500), source: str = None):
     conn = get_connection()
     try:
-        rows = conn.execute(
-            "SELECT * FROM api_logs ORDER BY id DESC LIMIT ?", (limit,)
-        ).fetchall()
+        if source:
+            rows = conn.execute(
+                "SELECT * FROM api_logs WHERE source=? ORDER BY id DESC LIMIT ?",
+                (source, limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM api_logs ORDER BY id DESC LIMIT ?", (limit,)
+            ).fetchall()
         return [_row_to_dict(r) for r in rows]
     finally:
         conn.close()
 
 
 @router.get("/anomalies")
-def get_anomalies(limit: int = Query(100, ge=1, le=500)):
-    """Return the most recent anomalous events only."""
+def get_anomalies(limit: int = Query(100, ge=1, le=500), source: str = None):
     conn = get_connection()
     try:
-        rows = conn.execute(
-            "SELECT * FROM api_logs WHERE is_anomaly = 1 ORDER BY id DESC LIMIT ?",
-            (limit,),
-        ).fetchall()
+        if source:
+            rows = conn.execute(
+                "SELECT * FROM api_logs WHERE is_anomaly=1 AND source=? ORDER BY id DESC LIMIT ?",
+                (source, limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM api_logs WHERE is_anomaly=1 ORDER BY id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
         return [_row_to_dict(r) for r in rows]
     finally:
         conn.close()
@@ -106,16 +110,11 @@ def get_anomalies(limit: int = Query(100, ge=1, le=500)):
 
 @router.get("/stats")
 def get_stats():
-    """Per-endpoint rolling statistics computed by the anomaly detector."""
     return _detector.get_endpoint_stats()
 
 
 @router.get("/timeseries")
 def get_timeseries(minutes: int = Query(10, ge=1, le=60)):
-    """
-    Return bucketed request counts and error counts per minute.
-    Powers the Live Metrics throughput/error chart.
-    """
     conn = get_connection()
     try:
         cutoff = (
@@ -129,19 +128,17 @@ def get_timeseries(minutes: int = Query(10, ge=1, le=60)):
                 COUNT(*) AS total,
                 SUM(CASE WHEN status_code >= 400 THEN 1 ELSE 0 END) AS errors,
                 AVG(latency_ms) AS avg_latency
-            FROM api_logs
-            WHERE timestamp >= ?
-            GROUP BY minute
-            ORDER BY minute ASC
+            FROM api_logs WHERE timestamp >= ?
+            GROUP BY minute ORDER BY minute ASC
             """,
             (cutoff,),
         ).fetchall()
 
         return [
             {
-                "minute": r["minute"],
-                "total": r["total"],
-                "errors": r["errors"],
+                "minute":      r["minute"],
+                "total":       r["total"],
+                "errors":      r["errors"],
                 "avg_latency": round(r["avg_latency"] or 0, 1),
             }
             for r in rows
@@ -150,8 +147,12 @@ def get_timeseries(minutes: int = Query(10, ge=1, le=60)):
         conn.close()
 
 
-async def _event_generator():
-    """Server-Sent Events generator — polls for new log events every second."""
+async def _sse_generator(source_filter: str = None):
+    """
+    True Server-Sent Events generator.
+    Polls for new log events every second and pushes them immediately.
+    Filters by source if specified.
+    """
     last_id = 0
     conn = get_connection()
     try:
@@ -164,14 +165,24 @@ async def _event_generator():
         await asyncio.sleep(1)
         conn = get_connection()
         try:
-            rows = conn.execute(
-                "SELECT * FROM api_logs WHERE id > ? ORDER BY id ASC LIMIT 20",
-                (last_id,),
-            ).fetchall()
+            if source_filter:
+                rows = conn.execute(
+                    "SELECT * FROM api_logs WHERE id > ? AND source=? ORDER BY id ASC LIMIT 20",
+                    (last_id, source_filter),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM api_logs WHERE id > ? ORDER BY id ASC LIMIT 20",
+                    (last_id,),
+                ).fetchall()
+
             for row in rows:
                 d = _row_to_dict(row)
                 last_id = d["id"]
                 yield f"data: {json.dumps(d)}\n\n"
+
+            # Heartbeat every cycle to keep connection alive
+            yield ": heartbeat\n\n"
         except Exception:
             pass
         finally:
@@ -179,13 +190,14 @@ async def _event_generator():
 
 
 @router.get("/stream")
-async def stream_logs():
-    """Server-Sent Events endpoint — streams new log events to the frontend."""
+async def stream_logs(source: str = None):
+    """True SSE endpoint — pushes new events instantly as they arrive."""
     return StreamingResponse(
-        _event_generator(),
+        _sse_generator(source_filter=source),
         media_type="text/event-stream",
         headers={
-            "Cache-Control": "no-cache",
+            "Cache-Control":   "no-cache",
             "X-Accel-Buffering": "no",
+            "Connection":      "keep-alive",
         },
     )

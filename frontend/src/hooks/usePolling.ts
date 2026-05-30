@@ -2,14 +2,8 @@
  * PulseDebug AI — Custom React Hooks
  * File: frontend/src/hooks/usePolling.ts
  * Purpose:
- *   Reusable hooks wrapping the API client with periodic polling.
- *   Dashboard components always show fresh data without complex state.
- *
- *   useStatus      — system health cards (polls every 3s)
- *   useIncidents   — incident list (polls every 5s)
- *   useTimeseries  — chart data (polls every 4s)
- *   useDeployments — deployment timeline (polls every 10s)
- *   useRecentLogs  — live log feed (polls every 2s)
+ *   Polling hooks plus new SSE hook for real-time streaming.
+ *   useSSE — connects to /api/logs/stream and receives pushed events.
  *
  * Author: PulseDebug AI Hackathon Team
  */
@@ -23,8 +17,9 @@ import {
   SystemStatus, Incident, TimeseriesPoint, Deployment, LogEvent,
 } from "@/lib/api";
 
-// ── Generic polling hook ───────────────────────────────────────────────────
+const BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
+// Generic polling hook
 export function usePolling<T>(
   fetchFn: () => Promise<T>,
   intervalMs: number,
@@ -55,13 +50,19 @@ export function usePolling<T>(
   return { data, loading, error, refetch: fetch };
 }
 
-// ── Specialised hooks ──────────────────────────────────────────────────────
-
+// Specialised hooks
 export const useStatus = () =>
   usePolling<SystemStatus | null>(getSystemStatus, 3000, null);
 
-export function useIncidents(status = "open") {
-  const fn = useCallback(() => getIncidents(status, 50), [status]);
+export function useIncidents(
+  status   = "open",
+  source   = "all",
+  severity = "all",
+) {
+  const fn = useCallback(
+    () => getIncidents(status, source, severity, false, 50),
+    [status, source, severity]
+  );
   return usePolling<Incident[]>(fn, 5000, []);
 }
 
@@ -76,4 +77,40 @@ export const useDeployments = () =>
 export function useRecentLogs(limit = 40) {
   const fn = useCallback(() => getRecentLogs(limit), [limit]);
   return usePolling<LogEvent[]>(fn, 2000, []);
+}
+
+// SSE hook — true real-time streaming via Server-Sent Events
+export function useSSELogs(maxItems = 60, source?: string): LogEvent[] {
+  const [logs, setLogs] = useState<LogEvent[]>([]);
+  const esRef = useRef<EventSource | null>(null);
+
+  useEffect(() => {
+    const url = `${BASE_URL}/api/logs/stream${source ? `?source=${source}` : ""}`;
+
+    const connect = () => {
+      const es = new EventSource(url);
+      esRef.current = es;
+
+      es.onmessage = (e) => {
+        try {
+          const log = JSON.parse(e.data) as LogEvent;
+          setLogs((prev) => [log, ...prev].slice(0, maxItems));
+        } catch {}
+      };
+
+      es.onerror = () => {
+        es.close();
+        // Reconnect after 3 seconds
+        setTimeout(connect, 3000);
+      };
+    };
+
+    connect();
+
+    return () => {
+      esRef.current?.close();
+    };
+  }, [source, maxItems]);
+
+  return logs;
 }
