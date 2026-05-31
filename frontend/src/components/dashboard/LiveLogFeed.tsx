@@ -2,16 +2,17 @@
  * PulseDebug AI — Live Log Feed
  * File: frontend/src/components/dashboard/LiveLogFeed.tsx
  * Purpose:
- *   Terminal-style scrolling log feed. Production polish:
- *   - Browser-local time for all timestamps
- *   - Anomalous events highlighted with red left border
+ *   Terminal-style scrolling log feed.
+ *   Shows newest events at the top (array is reversed before render).
+ *   The auto-scroll useEffect has been removed because it called
+ *   scrollIntoView on the whole page instead of inside the container,
+ *   causing the entire page to jump down every 2 seconds.
  *
  * Author: PulseDebug AI Hackathon Team
  */
 
 "use client";
 
-import { useEffect, useRef } from "react";
 import { LogEvent } from "@/lib/api";
 
 const statusColor  = (c: number) =>
@@ -32,14 +33,9 @@ function localTime(iso: string): string {
 }
 
 export default function LiveLogFeed({ logs }: { logs: LogEvent[] }) {
-  const bottomRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [logs.length]);
-
   return (
     <div className="card flex flex-col h-full">
+      {/* Header */}
       <div className="flex items-center justify-between px-4 py-3 border-b border-[#30363d]">
         <div className="flex items-center gap-2">
           <span className="live-dot" />
@@ -53,6 +49,7 @@ export default function LiveLogFeed({ logs }: { logs: LogEvent[] }) {
         </span>
       </div>
 
+      {/* Log lines — newest first, no auto-scroll */}
       <div className="flex-1 overflow-y-auto p-3 font-mono text-xs space-y-0.5 bg-[#0d1117]">
         {logs.length === 0 && (
           <div className="text-[#484f58] py-4 text-center">
@@ -98,7 +95,6 @@ export default function LiveLogFeed({ logs }: { logs: LogEvent[] }) {
             )}
           </div>
         ))}
-        <div ref={bottomRef} />
       </div>
     </div>
   );

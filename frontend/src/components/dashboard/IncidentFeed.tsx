@@ -2,11 +2,11 @@
  * PulseDebug AI — Incident Feed
  * File: frontend/src/components/dashboard/IncidentFeed.tsx
  * Purpose:
- *   Scrollable incident list. Production polish:
- *   - Live relative timestamps refreshed every 30s
- *   - New incidents highlight in yellow on insertion
- *   - Auto-scrolls to top when new incident arrives
- *   - Browser-local time throughout
+ *   Scrollable list of active incidents.
+ *   Fix: the auto-scroll to top on new incident no longer scrolls the
+ *   whole page. It only scrolls the internal list container, and only
+ *   when the container is already visible in the viewport. If the user
+ *   is reading something else on the page the feed stays put.
  *
  * Author: PulseDebug AI Hackathon Team
  */
@@ -66,9 +66,9 @@ function IncidentRow({
   isNew,
   onSelect,
 }: {
-  inc: Incident;
+  inc:      Incident;
   selected: boolean;
-  isNew: boolean;
+  isNew:    boolean;
   onSelect: () => void;
 }) {
   const timeLabel = useRelativeTime(inc.first_detected);
@@ -159,20 +159,37 @@ export default function IncidentFeed({
 
   useEffect(() => {
     const incoming = new Set(incidents.map((i) => i.id));
-    const added = new Set<number>();
+    const added    = new Set<number>();
+
     incoming.forEach((id) => {
       if (!prevIds.current.has(id)) added.add(id);
     });
+
     if (added.size > 0) {
       setNewIds(added);
-      listRef.current?.scrollTo({ top: 0, behavior: "smooth" });
+
+      // Only scroll inside the container if it is already visible
+      // in the viewport — never force the whole page to scroll down
+      if (listRef.current) {
+        const rect = listRef.current.getBoundingClientRect();
+        const isVisible =
+          rect.top >= 0 &&
+          rect.bottom <= (window.innerHeight || document.documentElement.clientHeight);
+
+        if (isVisible) {
+          listRef.current.scrollTo({ top: 0, behavior: "smooth" });
+        }
+      }
+
       setTimeout(() => setNewIds(new Set()), 3000);
     }
+
     prevIds.current = incoming;
   }, [incidents]);
 
   return (
     <div className="card flex flex-col h-full min-h-0">
+      {/* Header */}
       <div className="flex items-center justify-between px-5 py-4 border-b border-[#30363d]">
         <div className="flex items-center gap-2">
           <Layers size={14} className="text-[#00d4ff]" />
@@ -189,6 +206,7 @@ export default function IncidentFeed({
         )}
       </div>
 
+      {/* List — internal scroll only, never affects page position */}
       <div
         ref={listRef}
         className="flex-1 overflow-y-auto divide-y divide-[#21262d]"
