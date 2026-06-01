@@ -287,6 +287,7 @@ class LogSimulator:
         while True:
             try:
                 await self._tick()
+                idle_ticks = 0
             except Exception as exc:
                 print(f"[Simulator] Error in tick: {exc}")
             await asyncio.sleep(settings.SIMULATOR_INTERVAL_SEC)
