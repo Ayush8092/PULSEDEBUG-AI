@@ -1,4 +1,4 @@
-# ⚡ PulseDebug AI
+#  PulseDebug AI
 
 **AI-Powered API Incident Triage and Resilience Analysis Platform**
 
