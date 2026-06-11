@@ -1,0 +1,66 @@
+# PulseDebug AI — Docker Compose
+# File: docker-compose.yml (root of repository)
+# Purpose:
+#   Orchestrates backend and frontend containers locally.
+#   Run the entire application with: docker compose up --build
+#   Both services share a network so frontend can reach backend.
+
+version: "3.9"
+
+services:
+
+  # ── FastAPI Backend ────────────────────────────────────────
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: pulsedebug-backend
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      # AI providers — loaded from backend/.env
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - GROQ_API_KEY=${GROQ_API_KEY}
+      - GEMINI_PRIMARY_MODEL=${GEMINI_PRIMARY_MODEL:-gemini-2.5-flash}
+      - GEMINI_FALLBACK_MODEL=${GEMINI_FALLBACK_MODEL:-gemini-2.0-flash-lite}
+      # Database — defaults to SQLite, override with PostgreSQL URL
+      - DATABASE_URL=${DATABASE_URL:-}
+      # Simulator settings
+      - SIMULATOR_INTERVAL_SEC=${SIMULATOR_INTERVAL_SEC:-20.0}
+      - SCENARIO_INJECTION_INTERVAL_SEC=${SCENARIO_INJECTION_INTERVAL_SEC:-300}
+    volumes:
+      # Persist SQLite database between container restarts in local dev
+      - ./backend/data:/app/data
+    networks:
+      - pulsedebug-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  # ── Next.js Frontend ──────────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        # Must be set at build time for Next.js NEXT_PUBLIC_ variables
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+    container_name: pulsedebug-frontend
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks:
+      - pulsedebug-network
+
+networks:
+  pulsedebug-network:
+    driver: bridge

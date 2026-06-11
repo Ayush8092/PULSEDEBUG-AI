@@ -3,60 +3,53 @@ PulseDebug AI — Deployments API Router
 =========================================
 File: backend/app/api/deployments.py
 Purpose:
-    Endpoints for deployment event records.
-    The dashboard uses these to show the deployment timeline and to
-    highlight which incidents correlate with a specific deploy.
-
-Endpoints:
-    GET  /api/deployments          — list all deployment events
-    GET  /api/deployments/recent   — last N deployments
-    GET  /api/deployments/{id}     — single deployment detail with linked incidents
+    Deployment event endpoints.
+    Updated to use database.execute(), fetchone(), fetchall() helpers
+    for PostgreSQL and SQLite compatibility.
 
 Author: PulseDebug AI Hackathon Team
 """
 
 from fastapi import APIRouter, HTTPException, Query
-
-from app.core.database import get_connection
+from app.core.database import get_connection, execute, fetchone, fetchall
 
 router = APIRouter()
 
 
-def _row_to_dict(row) -> dict:
-    return dict(row)
-
-
 @router.get("")
 def list_deployments(limit: int = Query(20, ge=1, le=100)):
-    """Return all deployment events, newest first."""
     conn = get_connection()
     try:
-        rows = conn.execute(
-            "SELECT * FROM deployments ORDER BY deployed_at DESC LIMIT ?",
-            (limit,),
-        ).fetchall()
-        return [_row_to_dict(r) for r in rows]
+        rows = fetchall(
+            execute(conn,
+                "SELECT * FROM deployments ORDER BY deployed_at DESC LIMIT ?",
+                (limit,),
+            )
+        )
+        return rows
     finally:
         conn.close()
 
 
 @router.get("/recent")
 def recent_deployments(limit: int = Query(5, ge=1, le=20)):
-    """Return the N most recent deployments — used in the timeline widget."""
     conn = get_connection()
     try:
-        rows = conn.execute(
-            "SELECT * FROM deployments ORDER BY deployed_at DESC LIMIT ?",
-            (limit,),
-        ).fetchall()
+        rows = fetchall(
+            execute(conn,
+                "SELECT * FROM deployments ORDER BY deployed_at DESC LIMIT ?",
+                (limit,),
+            )
+        )
         result = []
-        for r in rows:
-            d = _row_to_dict(r)
-            incident_count = conn.execute(
-                "SELECT COUNT(*) FROM incidents WHERE deployment_id = ?",
-                (d["id"],),
-            ).fetchone()[0]
-            d["linked_incident_count"] = incident_count
+        for d in rows:
+            count_row = fetchone(
+                execute(conn,
+                    "SELECT COUNT(*) as cnt FROM incidents WHERE deployment_id = ?",
+                    (d["id"],),
+                )
+            )
+            d["linked_incident_count"] = count_row["cnt"] if count_row else 0
             result.append(d)
         return result
     finally:
@@ -65,22 +58,22 @@ def recent_deployments(limit: int = Query(5, ge=1, le=20)):
 
 @router.get("/{deployment_id}")
 def get_deployment(deployment_id: int):
-    """Return a single deployment with linked incidents."""
     conn = get_connection()
     try:
-        row = conn.execute(
-            "SELECT * FROM deployments WHERE id = ?", (deployment_id,)
-        ).fetchone()
+        row = fetchone(
+            execute(conn, "SELECT * FROM deployments WHERE id = ?", (deployment_id,))
+        )
         if not row:
             raise HTTPException(status_code=404, detail="Deployment not found")
 
-        d = _row_to_dict(row)
-        incidents = conn.execute(
-            "SELECT id, title, severity, status, occurrence_count FROM incidents "
-            "WHERE deployment_id = ?",
-            (deployment_id,),
-        ).fetchall()
-        d["incidents"] = [_row_to_dict(i) for i in incidents]
-        return d
+        incidents = fetchall(
+            execute(conn,
+                "SELECT id, title, severity, status, occurrence_count "
+                "FROM incidents WHERE deployment_id = ?",
+                (deployment_id,),
+            )
+        )
+        row["incidents"] = incidents
+        return row
     finally:
         conn.close()
