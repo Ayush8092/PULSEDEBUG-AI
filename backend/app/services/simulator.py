@@ -3,26 +3,9 @@ PulseDebug AI — Log Simulator Service
 ========================================
 File: backend/app/services/simulator.py
 Purpose:
-    Continuously generates realistic API traffic events and periodically
-    injects pre-defined failure scenarios so the dashboard always has
-    live, interesting data to display.
-
-    Production polish additions:
-        - Periodic auto-resolution of low-severity open incidents so the
-          active incident count fluctuates naturally (6 -> 7 -> 5 -> 6)
-        - Critical incidents never auto-resolve — only via manual resolve
-        - Dynamic incident count shifts as new scenarios inject
-
-    Normal traffic is generated for five simulated microservices:
-        Auth API, Payment API, Orders API, Inventory API, Notification API
-
-    Failure scenarios injected on rotation:
-        1. auth_secret_mismatch   — JWT 401 storm on Auth API
-        2. db_timeout             — 504 latency cascade on Orders API
-        3. malformed_payload      — 400 burst on Payment API
-        4. deployment_regression  — 500 spike after deploy event
-        5. dependency_outage      — Notification API 503 flood
-        6. retry_storm            — rapid 429 burst on Orders API
+    Generates synthetic API traffic and injects failure scenarios.
+    Fixed: replaced all conn.execute() calls with database.execute()
+    helper so the simulator works with both SQLite and PostgreSQL.
 
 Author: PulseDebug AI Hackathon Team
 """
@@ -32,15 +15,11 @@ import random
 from datetime import datetime, timezone
 from typing import Optional
 
-from app.core.database import get_connection
+from app.core.database import get_connection, execute, commit, lastrowid, USING_POSTGRES
 from app.core.config import settings
 from app.services.anomaly_detector import AnomalyDetector
 from app.services.clustering import IncidentClusterer
 
-
-# ---------------------------------------------------------------------------
-# Service definitions
-# ---------------------------------------------------------------------------
 
 SERVICES = [
     {
@@ -75,7 +54,6 @@ SERVICES = [
     },
 ]
 
-# Deployment version counter — bumped on each scenario injection
 _deploy_version = [1, 4, 0]
 
 
@@ -83,10 +61,6 @@ def _next_deploy_version() -> str:
     _deploy_version[2] += 1
     return f"v{_deploy_version[0]}.{_deploy_version[1]}.{_deploy_version[2]}"
 
-
-# ---------------------------------------------------------------------------
-# Scenario definitions
-# ---------------------------------------------------------------------------
 
 SCENARIOS = [
     {
@@ -179,95 +153,100 @@ def _insert_log(
     error_msg: Optional[str] = None,
     is_anomaly: bool = False,
     scenario: Optional[str] = None,
+    source: str = "demo",
 ) -> int:
-    cursor = conn.execute(
-        """
-        INSERT INTO api_logs
-            (timestamp, service, endpoint, method, status_code, latency_ms,
-             error_type, error_msg, is_anomaly, scenario)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            _now_iso(), service, endpoint, method, status_code, latency_ms,
-            error_type, error_msg, 1 if is_anomaly else 0, scenario,
-        ),
-    )
-    conn.commit()
-    return cursor.lastrowid
+    """Insert a log event. Works with both SQLite and PostgreSQL."""
+    if USING_POSTGRES:
+        cur = execute(conn,
+            """
+            INSERT INTO api_logs
+                (timestamp, service, endpoint, method, status_code, latency_ms,
+                 error_type, error_msg, is_anomaly, scenario, source)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            RETURNING id
+            """,
+            (_now_iso(), service, endpoint, method, status_code, latency_ms,
+             error_type, error_msg, 1 if is_anomaly else 0, scenario, source),
+        )
+        row_id = lastrowid(cur)
+    else:
+        cur = execute(conn,
+            """
+            INSERT INTO api_logs
+                (timestamp, service, endpoint, method, status_code, latency_ms,
+                 error_type, error_msg, is_anomaly, scenario, source)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (_now_iso(), service, endpoint, method, status_code, latency_ms,
+             error_type, error_msg, 1 if is_anomaly else 0, scenario, source),
+        )
+        row_id = lastrowid(cur)
+
+    commit(conn)
+    return row_id
 
 
-def _insert_deployment(
-    conn,
-    version: str,
-    service: str,
-    notes: str,
-) -> int:
-    cursor = conn.execute(
-        """
-        INSERT INTO deployments (version, service, deployed_at, status, notes)
-        VALUES (?, ?, ?, 'success', ?)
-        """,
-        (version, service, _now_iso(), notes),
-    )
-    conn.commit()
-    return cursor.lastrowid
+def _insert_deployment(conn, version: str, service: str, notes: str) -> int:
+    """Insert a deployment event. Works with both SQLite and PostgreSQL."""
+    if USING_POSTGRES:
+        cur = execute(conn,
+            """
+            INSERT INTO deployments (version, service, deployed_at, status, notes)
+            VALUES (?, ?, ?, 'success', ?)
+            RETURNING id
+            """,
+            (version, service, _now_iso(), notes),
+        )
+        row_id = lastrowid(cur)
+    else:
+        cur = execute(conn,
+            """
+            INSERT INTO deployments (version, service, deployed_at, status, notes)
+            VALUES (?, ?, ?, 'success', ?)
+            """,
+            (version, service, _now_iso(), notes),
+        )
+        row_id = lastrowid(cur)
 
+    commit(conn)
+    return row_id
 
-# ---------------------------------------------------------------------------
-# Incident fluctuation — auto-resolve low-severity incidents periodically
-# ---------------------------------------------------------------------------
 
 def _auto_resolve_low_severity(conn) -> None:
-    """
-    Randomly auto-resolve one investigate/warning incident so the active
-    incident count fluctuates naturally.
-    Never resolves critical incidents — those require manual intervention.
-    Only fires 25 percent of the time it is called.
-    """
+    """Randomly auto-resolve one low-severity incident for natural fluctuation."""
     if random.random() > 0.25:
         return
 
-    row = conn.execute(
-        """
-        SELECT id FROM incidents
-        WHERE status = 'open'
-          AND severity IN ('investigate', 'warning')
-        ORDER BY RANDOM()
-        LIMIT 1
-        """
-    ).fetchone()
+    from app.core.database import fetchone
+    row = fetchone(
+        execute(conn,
+            """
+            SELECT id FROM incidents
+            WHERE status = 'open'
+              AND severity IN ('investigate', 'warning')
+            ORDER BY RANDOM()
+            LIMIT 1
+            """,
+        )
+    )
 
     if row:
-        conn.execute(
-            """
-            UPDATE incidents
-            SET status = 'resolved', updated_at = datetime('now')
-            WHERE id = ?
-            """,
-            (row["id"],),
+        execute(conn,
+            "UPDATE incidents SET status='resolved', updated_at=? WHERE id=?",
+            (_now_iso(), row["id"]),
         )
-        conn.commit()
-        print(f"[Simulator] Auto-resolved low-severity incident #{row['id']}")
+        commit(conn)
+        print(f"[Simulator] Auto-resolved incident #{row['id']}")
 
-
-# ---------------------------------------------------------------------------
-# Main simulator class
-# ---------------------------------------------------------------------------
 
 class LogSimulator:
-    """
-    Async background task.
-    Generates normal log events every SIMULATOR_INTERVAL_SEC seconds.
-    Injects a failure scenario burst every SCENARIO_INJECTION_INTERVAL_SEC seconds.
-    Auto-resolves low-severity incidents roughly every 90 seconds.
-    """
+    """Async background task that generates log events and injects failure scenarios."""
 
     def __init__(self):
         self.detector  = AnomalyDetector()
         self.clusterer = IncidentClusterer()
 
-        self._scenario_index = 0
-
+        self._scenario_index              = 0
         self._ticks_since_last_scenario   = 0
         self._ticks_since_last_autoresolve = 0
 
@@ -275,19 +254,15 @@ class LogSimulator:
             settings.SCENARIO_INJECTION_INTERVAL_SEC
             / settings.SIMULATOR_INTERVAL_SEC
         )
-
-        # Auto-resolve fires roughly every 90 seconds
         self._ticks_per_autoresolve = int(
             90.0 / settings.SIMULATOR_INTERVAL_SEC
         )
 
     async def run(self):
-        """Main loop — one tick per SIMULATOR_INTERVAL_SEC."""
         print("[Simulator] Starting log simulation...")
         while True:
             try:
                 await self._tick()
-                idle_ticks = 0
             except Exception as exc:
                 print(f"[Simulator] Error in tick: {exc}")
             await asyncio.sleep(settings.SIMULATOR_INTERVAL_SEC)
@@ -298,24 +273,21 @@ class LogSimulator:
             self._ticks_since_last_scenario    += 1
             self._ticks_since_last_autoresolve += 1
 
-            # ---- Inject scenario burst ------------------------------------
             if self._ticks_since_last_scenario >= self._ticks_per_scenario:
                 self._ticks_since_last_scenario = 0
                 await self._inject_scenario(conn)
 
-            # ---- Periodic auto-resolve for natural fluctuation -----------
             if self._ticks_since_last_autoresolve >= self._ticks_per_autoresolve:
                 self._ticks_since_last_autoresolve = 0
                 _auto_resolve_low_severity(conn)
 
-            # ---- Normal traffic events -----------------------------------
+            # Generate normal traffic events
             for _ in range(random.randint(1, 3)):
                 svc      = random.choice(SERVICES)
                 endpoint = random.choice(svc["endpoints"])
                 status   = random.choice(svc["normal_codes"])
                 latency  = random.randint(*svc["normal_latency"])
 
-                # Occasional normal-range slower request — not an anomaly
                 if random.random() < 0.05:
                     latency = random.randint(250, 450)
 
@@ -326,6 +298,7 @@ class LogSimulator:
                     method="GET" if "status" in endpoint else "POST",
                     status_code=status,
                     latency_ms=latency,
+                    source="demo",
                 )
 
                 self.detector.evaluate(
@@ -340,8 +313,7 @@ class LogSimulator:
             conn.close()
 
     async def _inject_scenario(self, conn):
-        """Inject a single failure scenario burst."""
-        scenario = SCENARIOS[self._scenario_index % len(SCENARIOS)]
+        scenario  = SCENARIOS[self._scenario_index % len(SCENARIOS)]
         self._scenario_index += 1
 
         version   = _next_deploy_version()
@@ -353,7 +325,6 @@ class LogSimulator:
         )
         print(f"[Simulator] Deployment {version} — {scenario['deploy_service']}")
 
-        # Small delay to simulate the incident appearing shortly after deploy
         await asyncio.sleep(1.5)
 
         for _ in range(scenario["burst"]):
@@ -369,21 +340,19 @@ class LogSimulator:
                 error_msg=scenario["error_msg"],
                 is_anomaly=True,
                 scenario=scenario["name"],
+                source="demo",
             )
             await asyncio.sleep(0.2)
 
-        print(
-            f"[Simulator] Injected '{scenario['name']}' "
-            f"— {scenario['burst']} events"
-        )
+        print(f"[Simulator] Injected '{scenario['name']}' — {scenario['burst']} events")
 
-        # Cluster the burst into an incident
         conn2 = get_connection()
         try:
             self.clusterer.cluster_recent(
                 conn2,
                 scenario=scenario["name"],
                 deployment_id=deploy_id,
+                source="demo",
             )
         finally:
             conn2.close()

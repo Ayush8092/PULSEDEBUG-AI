@@ -3,8 +3,9 @@ PulseDebug AI — Incident Clustering Engine
 ============================================
 File: backend/app/services/clustering.py
 Purpose:
-    Groups anomalous events into de-duplicated incidents.
-    Upgrade: source tagging (demo / external / manual) on all incidents.
+    Groups anomalous events into deduplicated incidents.
+    Fixed: replaced all conn.execute() calls with database.execute()
+    helper so clustering works with both SQLite and PostgreSQL.
 
 Author: PulseDebug AI Hackathon Team
 """
@@ -14,6 +15,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Optional
 
 from app.core.config import settings
+from app.core.database import execute, fetchone, commit, lastrowid, USING_POSTGRES
 
 
 def _now_iso() -> str:
@@ -37,14 +39,17 @@ SCENARIO_TITLES = {
 
 
 def _severity_for(status_code: int) -> str:
-    return SEVERITY_MAP.get(status_code, "critical" if status_code >= 500 else "investigate")
+    return SEVERITY_MAP.get(
+        status_code,
+        "critical" if status_code >= 500 else "investigate"
+    )
 
 
 class IncidentClusterer:
 
     def cluster_recent(
         self,
-        conn: sqlite3.Connection,
+        conn,
         *,
         scenario: str,
         deployment_id: Optional[int] = None,
@@ -55,14 +60,16 @@ class IncidentClusterer:
             - timedelta(seconds=settings.CLUSTER_TIME_WINDOW_SEC)
         ).isoformat()
 
-        rows = conn.execute(
+        rows_cur = execute(conn,
             """
             SELECT * FROM api_logs
             WHERE is_anomaly = 1 AND scenario = ? AND timestamp >= ?
             ORDER BY timestamp DESC LIMIT 50
             """,
             (scenario, cutoff),
-        ).fetchall()
+        )
+        from app.core.database import fetchall
+        rows = fetchall(rows_cur)
 
         if not rows:
             return None
@@ -80,7 +87,8 @@ class IncidentClusterer:
         title     = SCENARIO_TITLES.get(scenario, f"{service} — Incident Detected")
 
         return self._upsert_incident(
-            conn, title=title, service=service, endpoint=endpoint,
+            conn,
+            title=title, service=service, endpoint=endpoint,
             error_sig=error_sig, severity=severity, count=count,
             first_ts=first_ts, last_ts=last_ts,
             deployment_id=deployment_id, source=source,
@@ -88,7 +96,7 @@ class IncidentClusterer:
 
     def cluster_external(
         self,
-        conn: sqlite3.Connection,
+        conn,
         *,
         service: str,
         endpoint: str,
@@ -103,7 +111,8 @@ class IncidentClusterer:
         title     = f"{service} — {error_type.replace('_', ' ').title()} ({source.title()})"
 
         return self._upsert_incident(
-            conn, title=title, service=service, endpoint=endpoint,
+            conn,
+            title=title, service=service, endpoint=endpoint,
             error_sig=error_sig, severity=severity, count=1,
             first_ts=now, last_ts=now,
             deployment_id=None, source=source,
@@ -111,7 +120,7 @@ class IncidentClusterer:
 
     def _upsert_incident(
         self,
-        conn: sqlite3.Connection,
+        conn,
         *,
         title: str,
         service: str,
@@ -126,19 +135,33 @@ class IncidentClusterer:
     ) -> int:
         is_deployment_related = deployment_id is not None
 
-        existing = conn.execute(
-            """
-            SELECT id, occurrence_count FROM incidents
-            WHERE service = ? AND endpoint = ? AND error_signature = ?
-              AND status = 'open'
-            ORDER BY first_detected DESC LIMIT 1
-            """,
-            (service, endpoint, error_sig),
-        ).fetchone()
+        existing = fetchone(
+            execute(conn,
+                """
+                SELECT id, occurrence_count FROM incidents
+                WHERE service = ? AND endpoint = ? AND error_signature = ?
+                  AND status = 'open'
+                ORDER BY first_detected DESC LIMIT 1
+                """,
+                (service, endpoint, error_sig),
+            )
+        )
 
         if existing:
             new_count = existing["occurrence_count"] + count
-            conn.execute(
+            execute(conn,
+                """
+                UPDATE incidents
+                SET occurrence_count = ?, last_seen = ?,
+                    deployment_id = COALESCE(?, deployment_id),
+                    deployment_related = GREATEST(deployment_related, ?),
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (new_count, last_ts, deployment_id,
+                 1 if is_deployment_related else 0,
+                 _now_iso(), existing["id"]),
+            ) if USING_POSTGRES else execute(conn,
                 """
                 UPDATE incidents
                 SET occurrence_count = ?, last_seen = ?,
@@ -148,23 +171,46 @@ class IncidentClusterer:
                 WHERE id = ?
                 """,
                 (new_count, last_ts, deployment_id,
-                 1 if is_deployment_related else 0, _now_iso(), existing["id"]),
+                 1 if is_deployment_related else 0,
+                 _now_iso(), existing["id"]),
             )
-            conn.commit()
+            commit(conn)
+            print(f"[Clusterer] Updated incident #{existing['id']} — {title}")
             return existing["id"]
+
         else:
-            cursor = conn.execute(
-                """
-                INSERT INTO incidents (
-                    title, service, endpoint, error_signature,
-                    severity, status, occurrence_count,
-                    first_detected, last_seen, deployment_id,
-                    deployment_related, source
-                ) VALUES (?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?)
-                """,
-                (title, service, endpoint, error_sig, severity, count,
-                 first_ts, last_ts, deployment_id,
-                 1 if is_deployment_related else 0, source),
-            )
-            conn.commit()
-            return cursor.lastrowid
+            if USING_POSTGRES:
+                cur = execute(conn,
+                    """
+                    INSERT INTO incidents (
+                        title, service, endpoint, error_signature,
+                        severity, status, occurrence_count,
+                        first_detected, last_seen, deployment_id,
+                        deployment_related, source
+                    ) VALUES (?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?)
+                    RETURNING id
+                    """,
+                    (title, service, endpoint, error_sig, severity, count,
+                     first_ts, last_ts, deployment_id,
+                     1 if is_deployment_related else 0, source),
+                )
+                incident_id = lastrowid(cur)
+            else:
+                cur = execute(conn,
+                    """
+                    INSERT INTO incidents (
+                        title, service, endpoint, error_signature,
+                        severity, status, occurrence_count,
+                        first_detected, last_seen, deployment_id,
+                        deployment_related, source
+                    ) VALUES (?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?)
+                    """,
+                    (title, service, endpoint, error_sig, severity, count,
+                     first_ts, last_ts, deployment_id,
+                     1 if is_deployment_related else 0, source),
+                )
+                incident_id = lastrowid(cur)
+
+            commit(conn)
+            print(f"[Clusterer] Created incident #{incident_id} — {title}")
+            return incident_id
